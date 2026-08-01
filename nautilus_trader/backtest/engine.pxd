@@ -488,6 +488,7 @@ cdef class OrderMatchingEngine:
     cdef void _process_quote_bar_high(self, QuoteTick tick)
     cdef void _process_quote_bar_low(self, QuoteTick tick)
     cdef void _process_quote_bar_close(self, QuoteTick tick, Quantity bid_close_size=*, Quantity ask_close_size=*)
+    cdef void _detach_market_on_open_orders_from_core(self)
     cdef void _fill_market_on_open_orders(self)
 
 # -- TRADING COMMANDS -----------------------------------------------------------------------------
