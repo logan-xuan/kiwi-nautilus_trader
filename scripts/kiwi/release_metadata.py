@@ -143,6 +143,7 @@ def _installed_payload_entry(name: str) -> bool:
         ".dist-info/direct_url.json",
         ".dist-info/INSTALLER",
         ".dist-info/REQUESTED",
+        ".dist-info/uv_cache.json",
     ))
 
 

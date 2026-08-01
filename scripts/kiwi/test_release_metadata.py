@@ -55,6 +55,9 @@ class ReleaseMetadataTest(unittest.TestCase):
         self.assertFalse(_installed_payload_entry("nautilus_trader/__pycache__/a.cpython-312.pyc"))
         self.assertFalse(_installed_payload_entry("nautilus_trader/a.pyc"))
         self.assertFalse(_installed_payload_entry("nautilus_trader/a.pyo"))
+        self.assertFalse(_installed_payload_entry(
+            "nautilus_trader-1.dist-info/uv_cache.json"
+        ))
         self.assertTrue(_installed_payload_entry("nautilus_trader/a.py"))
 
 
