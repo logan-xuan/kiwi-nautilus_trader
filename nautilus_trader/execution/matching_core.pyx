@@ -22,6 +22,7 @@ from nautilus_trader.core.rust.model cimport LiquiditySide
 from nautilus_trader.core.rust.model cimport OrderSide
 from nautilus_trader.core.rust.model cimport OrderType
 from nautilus_trader.core.rust.model cimport PriceRaw
+from nautilus_trader.core.rust.model cimport TimeInForce
 from nautilus_trader.model.functions cimport order_type_to_str
 from nautilus_trader.model.identifiers cimport ClientOrderId
 from nautilus_trader.model.objects cimport Price
@@ -290,7 +291,8 @@ cdef class MatchingCore:
         Raises
         ------
         TypeError
-            If the `order.order_type` is an invalid type for the core (e.g. `MARKET`).
+            If the `order.order_type` is invalid for the core (e.g. a `MARKET`
+            order which is not explicitly `AT_THE_OPEN`).
 
         """
         Condition.not_none(order, "order")
@@ -300,6 +302,14 @@ cdef class MatchingCore:
             or order.order_type == OrderType.MARKET_TO_LIMIT
         ):
             self.match_limit_order(order)
+        elif (
+            order.order_type == OrderType.MARKET
+            and order.time_in_force == TimeInForce.AT_THE_OPEN
+        ):
+            # MARKET orders normally never rest in MatchingCore. A market-on-open
+            # order is the single exception: it is accepted before the next
+            # execution bar exists and is matched only when that bar opens.
+            self._fill_market_order(order)
         elif order.order_type == OrderType.STOP_LIMIT:
             self.match_stop_limit_order(order, initial)
         elif order.order_type == OrderType.STOP_MARKET:
