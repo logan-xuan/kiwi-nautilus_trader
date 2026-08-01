@@ -2,9 +2,11 @@
 """Focused tests for the Kiwi release metadata contract."""
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+import zipfile
 
-from release_metadata import load_manifest, wheel_platform_tag
+from release_metadata import load_manifest, wheel_installation_hash, wheel_platform_tag
 
 
 class ReleaseMetadataTest(unittest.TestCase):
@@ -24,6 +26,25 @@ class ReleaseMetadataTest(unittest.TestCase):
     def test_invalid_wheel_name_is_rejected(self) -> None:
         with self.assertRaises(SystemExit):
             wheel_platform_tag(Path("nautilus_trader.whl"))
+
+    def test_installation_hash_is_stable_and_excludes_rewritten_record(self) -> None:
+        with TemporaryDirectory() as directory:
+            first = Path(directory) / "first.whl"
+            second = Path(directory) / "second.whl"
+            with zipfile.ZipFile(first, "w") as archive:
+                archive.writestr("nautilus_trader/module.py", b"value = 1\n")
+                archive.writestr("nautilus_trader-1.dist-info/METADATA", b"Version: 1\n")
+                archive.writestr("nautilus_trader-1.dist-info/RECORD", b"first")
+            with zipfile.ZipFile(second, "w") as archive:
+                archive.writestr("nautilus_trader-1.dist-info/RECORD", b"rewritten")
+                archive.writestr("nautilus_trader-1.dist-info/METADATA", b"Version: 1\n")
+                archive.writestr("nautilus_trader/module.py", b"value = 1\n")
+            self.assertEqual(wheel_installation_hash(first), wheel_installation_hash(second))
+
+            with zipfile.ZipFile(second, "w") as archive:
+                archive.writestr("nautilus_trader/module.py", b"value = 2\n")
+                archive.writestr("nautilus_trader-1.dist-info/METADATA", b"Version: 1\n")
+            self.assertNotEqual(wheel_installation_hash(first), wheel_installation_hash(second))
 
 
 if __name__ == "__main__":

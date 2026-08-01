@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from importlib.metadata import distribution
 import json
 import os
 import platform
@@ -86,6 +87,68 @@ def wheel_version(path: Path) -> str:
     raise SystemExit("wheel version is missing")
 
 
+def wheel_installation_hash(path: Path) -> str:
+    """Hash the immutable installed payload, independent of ZIP packing metadata.
+
+    RECORD is excluded because installers rewrite it when adding PEP 610 evidence.
+    All executable package, extension, metadata, license and Kiwi notice bytes remain
+    covered by this digest.
+    """
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(path) as archive:
+        names = sorted(
+            name for name in archive.namelist()
+            if not name.endswith("/") and not name.endswith(".dist-info/RECORD")
+        )
+        for name in names:
+            content = archive.read(name)
+            digest.update(name.encode())
+            digest.update(b"\0")
+            digest.update(str(len(content)).encode())
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
+def installed_distribution_hash(name: str) -> str:
+    installed = distribution(name)
+    files = installed.files
+    if not files:
+        raise SystemExit(f"installed distribution has no payload manifest: {name}")
+    digest = hashlib.sha256()
+    selected = sorted(
+        (entry for entry in files if _installed_payload_entry(entry.as_posix())),
+        key=lambda entry: entry.as_posix(),
+    )
+    for entry in selected:
+        content = installed.locate_file(entry).read_bytes()
+        path = entry.as_posix()
+        digest.update(path.encode())
+        digest.update(b"\0")
+        digest.update(str(len(content)).encode())
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
+def _installed_payload_entry(name: str) -> bool:
+    if name.endswith(".dist-info/RECORD"):
+        return False
+    return not name.endswith((
+        ".dist-info/direct_url.json",
+        ".dist-info/INSTALLER",
+        ".dist-info/REQUESTED",
+    ))
+
+
+def verify_installed(provenance_path: Path) -> None:
+    provenance = json.loads(provenance_path.read_text())
+    expected = provenance.get("installedPayloadSha256")
+    actual = installed_distribution_hash("nautilus_trader")
+    if actual != expected:
+        raise SystemExit(f"installed payload {actual} != release payload {expected}")
+
+
 def validate_wheel_notices(path: Path) -> None:
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
@@ -141,6 +204,7 @@ def emit(wheel: Path, output: Path, manifest: dict[str, object]) -> None:
         "forkCommit": git("rev-parse", "HEAD"),
         "wheel": wheel.name,
         "wheelSha256": sha256(wheel),
+        "installedPayloadSha256": wheel_installation_hash(wheel),
         "dependencyLockHash": sha256(ROOT / "uv.lock"),
         "cargoLockHash": sha256(ROOT / "Cargo.lock"),
         "buildManifestHash": sha256(MANIFEST_PATH),
@@ -205,11 +269,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wheel", type=Path)
     parser.add_argument("--output", type=Path, default=ROOT / "dist" / "kiwi-metadata")
+    parser.add_argument("--verify-installed", type=Path)
     args = parser.parse_args()
     manifest = load_manifest()
     validate(manifest)
     if args.wheel:
         emit(args.wheel.resolve(), args.output.resolve(), manifest)
+    if args.verify_installed:
+        verify_installed(args.verify_installed.resolve())
 
 
 if __name__ == "__main__":

@@ -78,6 +78,11 @@ jobs:
       - name: Generate release metadata
         run: python3 scripts/kiwi/release_metadata.py --wheel "$(find dist -maxdepth 1 -name 'nautilus_trader-*.whl' -print -quit)" --output "dist/kiwi-metadata-macos-arm64"
 
+      - name: Verify installed payload against release provenance
+        run: >-
+          .kiwi-wheel-smoke/bin/python scripts/kiwi/release_metadata.py
+          --verify-installed dist/kiwi-metadata-macos-arm64/kiwi-build-provenance.json
+
       - name: Upload wheel and metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
