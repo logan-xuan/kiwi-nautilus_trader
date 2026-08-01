@@ -4918,6 +4918,7 @@ cdef class OrderMatchingEngine:
 
             self._fill_at_market = True  # Gap from previous bar
             self._book.update_trade_tick(tick)
+            self._detach_market_on_open_orders_from_core()
             self.iterate(tick.ts_init)
             self._core.set_last_raw(bar._mem.open.raw)
             self._fill_market_on_open_orders()
@@ -5032,8 +5033,18 @@ cdef class OrderMatchingEngine:
     cdef void _process_quote_bar_open(self, QuoteTick tick):
         self._fill_at_market = True  # Gap from previous bar
         self._book.update_quote_tick(tick)
+        self._detach_market_on_open_orders_from_core()
         self.iterate(tick.ts_init)
         self._fill_market_on_open_orders()
+
+    cdef void _detach_market_on_open_orders_from_core(self):
+        # Generic cache replay may re-accept open orders. MatchingCore cannot
+        # match MARKET orders, so enforce the dedicated queue invariant at the
+        # final boundary immediately before matching an execution-bar open.
+        cdef Order order
+        for order in self._market_on_open_orders.values():
+            if self._core.order_exists(order.client_order_id):
+                self._core.delete_order(order)
 
     cdef void _fill_market_on_open_orders(self):
         cdef list orders = list(self._market_on_open_orders.values())
@@ -5373,7 +5384,8 @@ cdef class OrderMatchingEngine:
                     "time in force AT_THE_OPEN requires bar execution",
                 )
                 return
-            self.accept_order(order)
+            self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
+            self._market_on_open_orders[order.client_order_id] = order
             return
 
         if order.time_in_force == TimeInForce.AT_THE_CLOSE:
