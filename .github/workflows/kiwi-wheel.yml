@@ -135,17 +135,27 @@ jobs:
         shell: bash
         run: |
           mkdir publish
-          for artifact_dir in release-assets/kiwi-nautilus-*; do
-            artifact_name="${artifact_dir##*/}"
-            find "$artifact_dir" -type f -name '*.whl' -exec cp {} publish/ \;
-            find "$artifact_dir" -type f -name '*.sha256' -exec cp {} publish/ \;
-            provenance="$(find "$artifact_dir" -type f -name 'kiwi-build-provenance.json' -print -quit)"
-            sbom="$(find "$artifact_dir" -type f -name 'kiwi-sbom.cdx.json' -print -quit)"
-            cp "$provenance" "publish/${artifact_name}-provenance.json"
-            cp "$sbom" "publish/${artifact_name}-sbom.cdx.json"
-          done
-          cp "$(find release-assets -type f -name LICENSE -print -quit)" publish/LICENSE
-          cp "$(find release-assets -type f -name KIWI_FORK.json -print -quit)" publish/KIWI_FORK.json
+          one_file() {
+            matches="$(find release-assets -type f -name "$1" -print)"
+            count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+            if [[ "$count" -ne 1 ]]; then
+              echo "expected exactly one $1, found $count" >&2
+              return 1
+            fi
+            printf '%s\n' "$matches"
+          }
+          wheel="$(one_file '*.whl')"
+          checksum="$(one_file '*.whl.sha256')"
+          provenance="$(one_file 'kiwi-build-provenance.json')"
+          sbom="$(one_file 'kiwi-sbom.cdx.json')"
+          license="$(one_file 'LICENSE')"
+          manifest="$(one_file 'KIWI_FORK.json')"
+          cp "$wheel" publish/
+          cp "$checksum" publish/
+          cp "$provenance" publish/kiwi-nautilus-macos-arm64-provenance.json
+          cp "$sbom" publish/kiwi-nautilus-macos-arm64-sbom.cdx.json
+          cp "$license" publish/LICENSE
+          cp "$manifest" publish/KIWI_FORK.json
 
       - name: Publish immutable wheel release
         env:
