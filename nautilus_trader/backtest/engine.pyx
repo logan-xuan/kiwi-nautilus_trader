@@ -4056,6 +4056,7 @@ cdef class OrderMatchingEngine:
         self._execution_bar_types: dict[InstrumentId, BarType]  =  {}
         self._execution_bar_deltas: dict[BarType, timedelta]  =  {}
         self._cached_filled_qty: dict[ClientOrderId, Quantity] = {}
+        self._market_on_open_orders: dict[ClientOrderId, Order] = {}
 
         # Market
         self._core = MatchingCore(
@@ -4124,6 +4125,7 @@ cdef class OrderMatchingEngine:
         self._execution_bar_types.clear()
         self._execution_bar_deltas.clear()
         self._cached_filled_qty.clear()
+        self._market_on_open_orders.clear()
         self._core.reset()
         self._target_bid = 0
         self._target_ask = 0
@@ -4253,7 +4255,9 @@ cdef class OrderMatchingEngine:
         list[Order]
 
         """
-        return self._core.get_orders_bid()
+        return self._core.get_orders_bid() + [
+            order for order in self._market_on_open_orders.values() if order.is_buy_c()
+        ]
 
     cpdef list[Order] get_open_ask_orders(self):
         """
@@ -4264,10 +4268,15 @@ cdef class OrderMatchingEngine:
         list[Order]
 
         """
-        return self._core.get_orders_ask()
+        return self._core.get_orders_ask() + [
+            order for order in self._market_on_open_orders.values() if order.is_sell_c()
+        ]
 
     cpdef bint order_exists(self, ClientOrderId client_order_id):
-        return self._core.order_exists(client_order_id)
+        return (
+            client_order_id in self._market_on_open_orders
+            or self._core.order_exists(client_order_id)
+        )
 
 # -- DATA PROCESSING ------------------------------------------------------------------------------
 
@@ -4893,7 +4902,11 @@ cdef class OrderMatchingEngine:
         )
 
     cdef void _process_trade_bar_open(self, Bar bar, TradeTick tick):
-        if not self._core.is_last_initialized or bar._mem.open.raw != self._core.last_raw:
+        if (
+            not self._core.is_last_initialized
+            or bar._mem.open.raw != self._core.last_raw
+            or self._market_on_open_orders
+        ):
             if is_logging_initialized():
                 self._log.debug(f"Updating with open {bar.open}")
 
@@ -4901,6 +4914,7 @@ cdef class OrderMatchingEngine:
             self._book.update_trade_tick(tick)
             self.iterate(tick.ts_init)
             self._core.set_last_raw(bar._mem.open.raw)
+            self._fill_market_on_open_orders()
 
     cdef void _process_trade_bar_high(self, Bar bar, TradeTick tick):
         if bar._mem.high.raw > self._core.last_raw:
@@ -5013,6 +5027,17 @@ cdef class OrderMatchingEngine:
         self._fill_at_market = True  # Gap from previous bar
         self._book.update_quote_tick(tick)
         self.iterate(tick.ts_init)
+        self._fill_market_on_open_orders()
+
+    cdef void _fill_market_on_open_orders(self):
+        cdef list orders = list(self._market_on_open_orders.values())
+        self._market_on_open_orders.clear()
+        cdef Order order
+        for order in orders:
+            if order.is_open_c():
+                self.fill_market_order(order)
+            if order.is_open_c():
+                self.expire_order(order)
 
     cdef void _process_quote_bar_high(self, QuoteTick tick):
         self._fill_at_market = False  # Market moving through prices
@@ -5256,7 +5281,9 @@ cdef class OrderMatchingEngine:
             )
 
     cpdef void process_cancel(self, CancelOrder command, AccountId account_id):
-        cdef Order order = self._core.get_order(command.client_order_id)
+        cdef Order order = self._market_on_open_orders.get(command.client_order_id)
+        if order is None:
+            order = self._core.get_order(command.client_order_id)
         if order is None:
             self._generate_order_cancel_rejected(
                 trader_id=command.trader_id,
@@ -5330,8 +5357,21 @@ cdef class OrderMatchingEngine:
         return True
 
     cdef void _process_market_order(self, MarketOrder order):
-        # Check AT_THE_OPEN/AT_THE_CLOSE time in force
-        if order.time_in_force == TimeInForce.AT_THE_OPEN or order.time_in_force == TimeInForce.AT_THE_CLOSE:
+        # Market-on-open orders rest until the next execution bar's open. This is
+        # deliberately limited to bar execution; tick-mode users should submit
+        # against an explicit session-open event instead.
+        if order.time_in_force == TimeInForce.AT_THE_OPEN:
+            if not self._bar_execution:
+                self._generate_order_rejected(
+                    order,
+                    "time in force AT_THE_OPEN requires bar execution",
+                )
+                return
+            self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
+            self._market_on_open_orders[order.client_order_id] = order
+            return
+
+        if order.time_in_force == TimeInForce.AT_THE_CLOSE:
             self._generate_order_rejected(
                 order,
                 f"time in force {time_in_force_to_str(order.time_in_force)} "
@@ -8148,6 +8188,7 @@ cdef class OrderMatchingEngine:
             return
 
         self._core.delete_order(order)
+        self._market_on_open_orders.pop(order.client_order_id, None)
         self._cached_filled_qty.pop(order.client_order_id, None)
         self._queue_ahead.pop(order.client_order_id, None)
 

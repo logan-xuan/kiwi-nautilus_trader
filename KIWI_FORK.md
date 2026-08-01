@@ -30,6 +30,12 @@ repository because this fork has GitHub Issues disabled. Its canonical issue
 reference, rationale, tests, and upstream status are recorded in
 `KIWI_FORK.json`.
 
+The `KIWI-BAR-NEXT-OPEN-001` patch adds the matching-engine primitive required
+to prevent current-bar look-ahead in bar-close strategies. It implements only
+generic `AT_THE_OPEN` backtest behavior; Kiwi strategy, portfolio, risk, and
+result semantics remain in the Trade Node adapter. The patch will be proposed
+upstream after its fork and adapter regressions are proven.
+
 ## Build policy
 
 Only CI-built wheels from a clean checkout are consumable by Trade Node. The

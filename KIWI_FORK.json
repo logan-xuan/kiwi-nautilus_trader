@@ -34,6 +34,17 @@
         "isolated wheel install and import smoke",
         "Kiwi wheel CI on macOS ARM64 and Linux x86_64"
       ]
+    },
+    {
+      "id": "KIWI-BAR-NEXT-OPEN-001",
+      "issue": "https://github.com/logan-xuan/kiwi-trade-node/issues/2",
+      "purpose": "Deterministic next-bar-open execution without current-bar look-ahead",
+      "adapterLimitation": "The upstream backtest matching engine rejects AT_THE_OPEN and ordinary market orders emitted from on_bar settle against the current closing book",
+      "upstreamStatus": "PENDING_PROVEN_PATCH",
+      "tests": [
+        "tests/unit_tests/backtest/test_exchange_margin.py::TestSimulatedExchangeMarginAccount::test_submit_market_on_open_order_fills_at_next_bar_open",
+        "Kiwi adapter BAR_NEXT_OPEN golden test"
+      ]
     }
   ]
 }

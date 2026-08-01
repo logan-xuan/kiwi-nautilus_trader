@@ -649,6 +649,53 @@ class TestSimulatedExchangeMarginAccount:
         # Corrected weighted average calculation
         assert np.round(order.avg_px, 4) == 90.0155
 
+    def test_submit_market_on_open_order_fills_at_next_bar_open(self) -> None:
+        first_bar = Bar(
+            bar_type=BarType.from_str(f"{_USDJPY_SIM.id.value}-1-MINUTE-LAST-EXTERNAL"),
+            open=Price.from_str("90.000"),
+            high=Price.from_str("90.030"),
+            low=Price.from_str("89.990"),
+            close=Price.from_str("90.015"),
+            volume=Quantity.from_int(20_000),
+            ts_event=60_000_000_000,
+            ts_init=60_000_000_000,
+        )
+        self.data_engine.process(first_bar)
+        self.exchange.process_bar(first_bar)
+        order = self.strategy.order_factory.market(
+            _USDJPY_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(10_000),
+            time_in_force=TimeInForce.AT_THE_OPEN,
+        )
+
+        self.strategy.submit_order(order)
+        self.exchange.process(first_bar.ts_init)
+
+        assert order.status == OrderStatus.ACCEPTED
+        assert self.exchange.order_exists(order.client_order_id)
+        assert self.exchange.get_open_orders() == [order]
+        assert not [msg for msg in self.strategy.store if isinstance(msg, OrderFilled)]
+
+        next_bar = Bar(
+            bar_type=first_bar.bar_type,
+            open=first_bar.close,
+            high=Price.from_str("90.500"),
+            low=Price.from_str("89.500"),
+            close=Price.from_str("90.200"),
+            volume=Quantity.from_int(20_000),
+            ts_event=120_000_000_000,
+            ts_init=120_000_000_000,
+        )
+        self.data_engine.process(next_bar)
+        self.exchange.process_bar(next_bar)
+
+        fills = [msg for msg in self.strategy.store if isinstance(msg, OrderFilled)]
+        assert order.status == OrderStatus.FILLED
+        assert fills[0].last_px == next_bar.open
+        assert fills[0].ts_event == next_bar.ts_init
+        assert not self.exchange.order_exists(order.client_order_id)
+
     def test_submit_limit_order_with_bar(self) -> None:
         # Arrange
         order = self.strategy.order_factory.limit(

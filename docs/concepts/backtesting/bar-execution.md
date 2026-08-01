@@ -111,12 +111,14 @@ engine.add_venue(
 )
 ```
 
-:::note
-The engine does not provide a native next-bar-open fill mode. A strategy can form a signal from a
-completed prior bar without look-ahead, but the next bar's open is processed before that next bar
-is dispatched. Using the current bar's open from its `on_bar` callback would introduce look-ahead;
-using latency with bar-only data normally settles against a later book state, not the next open.
-:::
+For an explicit next-bar-open fill, submit a market order with
+`TimeInForce.AT_THE_OPEN`. The matching engine accepts the order without executing against the
+current bar's closing book and activates it at the next execution bar's open. This mode requires
+`bar_execution=True`; tick-mode callers should instead submit against an explicit session-open
+event. `AT_THE_CLOSE` remains unsupported.
+
+Using an ordinary market order from `on_bar` still settles against the current closing book and
+must not be presented as next-open execution.
 
 ## Internal bar aggregation timing
 
