@@ -673,7 +673,8 @@ class TestSimulatedExchangeMarginAccount:
         self.exchange.process(first_bar.ts_init)
 
         assert order.status == OrderStatus.ACCEPTED
-        assert self.exchange.order_exists(order.client_order_id)
+        matching_engine = self.exchange.get_matching_engine(_USDJPY_SIM.id)
+        assert matching_engine.order_exists(order.client_order_id)
         assert self.exchange.get_open_orders() == [order]
         assert not [msg for msg in self.strategy.store if isinstance(msg, OrderFilled)]
 
@@ -694,7 +695,7 @@ class TestSimulatedExchangeMarginAccount:
         assert order.status == OrderStatus.FILLED
         assert fills[0].last_px == next_bar.open
         assert fills[0].ts_event == next_bar.ts_init
-        assert not self.exchange.order_exists(order.client_order_id)
+        assert not matching_engine.order_exists(order.client_order_id)
 
     def test_submit_limit_order_with_bar(self) -> None:
         # Arrange
