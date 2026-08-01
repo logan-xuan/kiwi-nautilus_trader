@@ -43,6 +43,10 @@ wheel, SHA-256 file, build provenance, SBOM, source manifest, and license are a
 single release set. Runtime environments must not import from this checkout,
 modify `site-packages`, or build in an installed application directory.
 
+The current release line builds macOS ARM64 because that is the approved Trade
+Node runtime. Linux x86_64 packaging is deferred until a Linux Quant Worker
+deployment is approved and does not block this release line.
+
 This fork remains licensed under LGPL-3.0-or-later. Any external distribution
 of a modified wheel must retain notices and provide the corresponding modified
 source as required by that license. Commercial distribution requires a formal

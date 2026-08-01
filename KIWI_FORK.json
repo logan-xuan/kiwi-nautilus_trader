@@ -32,7 +32,7 @@
       "tests": [
         "scripts/kiwi/test_release_metadata.py",
         "isolated wheel install and import smoke",
-        "Kiwi wheel CI on macOS ARM64 and Linux x86_64"
+        "Kiwi wheel CI on macOS ARM64"
       ]
     },
     {
