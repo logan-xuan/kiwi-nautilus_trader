@@ -4918,7 +4918,6 @@ cdef class OrderMatchingEngine:
 
             self._fill_at_market = True  # Gap from previous bar
             self._book.update_trade_tick(tick)
-            self._detach_market_on_open_orders_from_core()
             self.iterate(tick.ts_init)
             self._core.set_last_raw(bar._mem.open.raw)
             self._fill_market_on_open_orders()
@@ -5033,19 +5032,8 @@ cdef class OrderMatchingEngine:
     cdef void _process_quote_bar_open(self, QuoteTick tick):
         self._fill_at_market = True  # Gap from previous bar
         self._book.update_quote_tick(tick)
-        self._detach_market_on_open_orders_from_core()
         self.iterate(tick.ts_init)
         self._fill_market_on_open_orders()
-
-    cdef void _detach_market_on_open_orders_from_core(self):
-        # Book updates may synchronously re-accept cached open orders through the
-        # exchange event path. MARKET orders are intentionally not matchable by
-        # MatchingCore, so keep AT_THE_OPEN orders solely in the dedicated queue
-        # until the explicit opening-price fill below.
-        cdef Order order
-        for order in self._market_on_open_orders.values():
-            if self._core.order_exists(order.client_order_id):
-                self._core.delete_order(order)
 
     cdef void _fill_market_on_open_orders(self):
         cdef list orders = list(self._market_on_open_orders.values())
@@ -5385,8 +5373,7 @@ cdef class OrderMatchingEngine:
                     "time in force AT_THE_OPEN requires bar execution",
                 )
                 return
-            self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
-            self._market_on_open_orders[order.client_order_id] = order
+            self.accept_order(order)
             return
 
         if order.time_in_force == TimeInForce.AT_THE_CLOSE:
@@ -8174,6 +8161,15 @@ cdef class OrderMatchingEngine:
     cpdef void accept_order(self, Order order):
         if order.is_closed_c():
             return  # Temporary guard to prevent invalid processing
+
+        # MARKET orders are invalid inside MatchingCore. Keep market-on-open
+        # orders in their dedicated queue even when the exchange re-accepts a
+        # cached open order before processing the next bar.
+        if order.order_type == OrderType.MARKET and order.time_in_force == TimeInForce.AT_THE_OPEN:
+            if not order.status_c() == OrderStatus.ACCEPTED:
+                self._generate_order_accepted(order, venue_order_id=self._get_venue_order_id(order))
+            self._market_on_open_orders[order.client_order_id] = order
+            return
 
         # Check if order already accepted (being added back into the matching engine)
         if not order.status_c() == OrderStatus.ACCEPTED:
