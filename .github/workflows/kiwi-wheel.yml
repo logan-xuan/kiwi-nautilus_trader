@@ -64,7 +64,7 @@ jobs:
         run: |
           uv venv .kiwi-wheel-smoke --python 3.12
           uv pip install --python .kiwi-wheel-smoke/bin/python dist/nautilus_trader-*.whl
-          .kiwi-wheel-smoke/bin/python -c 'import importlib.metadata; from nautilus_trader.backtest.engine import BacktestEngine; from nautilus_trader.model.data import Bar, QuoteTick, TradeTick; assert importlib.metadata.version("nautilus_trader") == "1.231.0+kiwi.1"'
+          .kiwi-wheel-smoke/bin/python -c 'import importlib.metadata, json; from nautilus_trader.backtest.engine import BacktestEngine; from nautilus_trader.model.data import Bar, QuoteTick, TradeTick; assert importlib.metadata.version("nautilus_trader") == json.load(open("KIWI_FORK.json"))["version"]'
 
       - name: Run upstream deterministic matching regressions
         run: |
@@ -115,7 +115,7 @@ jobs:
       - name: Attest wheel provenance
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: attestation-assets/nautilus_trader-*.whl
+          subject-path: attestation-assets/**/nautilus_trader-*.whl
 
   release:
     name: immutable GitHub release

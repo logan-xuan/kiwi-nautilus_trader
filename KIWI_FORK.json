@@ -1,7 +1,7 @@
 {
   "schemaVersion": "kiwi-nautilus-fork-v1",
   "distribution": "nautilus_trader",
-  "version": "1.231.0+kiwi.1",
+  "version": "1.231.0+kiwi.2",
   "upstreamRepository": "https://github.com/nautechsystems/nautilus_trader.git",
   "upstreamVersion": "1.231.0",
   "upstreamCommit": "160f76a8d0d1067bee16ea171dcbd7e3e18b414f",
