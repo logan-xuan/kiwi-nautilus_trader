@@ -4255,9 +4255,12 @@ cdef class OrderMatchingEngine:
         list[Order]
 
         """
-        return self._core.get_orders_bid() + [
-            order for order in self._market_on_open_orders.values() if order.is_buy_c()
-        ]
+        cdef list orders = self._core.get_orders_bid()
+        cdef Order order
+        for order in self._market_on_open_orders.values():
+            if order.is_buy_c():
+                orders.append(order)
+        return orders
 
     cpdef list[Order] get_open_ask_orders(self):
         """
@@ -4268,9 +4271,12 @@ cdef class OrderMatchingEngine:
         list[Order]
 
         """
-        return self._core.get_orders_ask() + [
-            order for order in self._market_on_open_orders.values() if order.is_sell_c()
-        ]
+        cdef list orders = self._core.get_orders_ask()
+        cdef Order order
+        for order in self._market_on_open_orders.values():
+            if order.is_sell_c():
+                orders.append(order)
+        return orders
 
     cpdef bint order_exists(self, ClientOrderId client_order_id):
         return (
