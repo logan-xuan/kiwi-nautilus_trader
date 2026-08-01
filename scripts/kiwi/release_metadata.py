@@ -132,6 +132,11 @@ def installed_distribution_hash(name: str) -> str:
 
 
 def _installed_payload_entry(name: str) -> bool:
+    # Installers may compile Python sources and append interpreter-specific
+    # bytecode paths to RECORD. Those files are derived from the signed source
+    # payload, vary by Python patch/runtime flags, and do not exist in the wheel.
+    if "/__pycache__/" in f"/{name}" or name.endswith((".pyc", ".pyo")):
+        return False
     if name.endswith(".dist-info/RECORD"):
         return False
     return not name.endswith((

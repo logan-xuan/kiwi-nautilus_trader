@@ -6,7 +6,12 @@ from tempfile import TemporaryDirectory
 import unittest
 import zipfile
 
-from release_metadata import load_manifest, wheel_installation_hash, wheel_platform_tag
+from release_metadata import (
+    _installed_payload_entry,
+    load_manifest,
+    wheel_installation_hash,
+    wheel_platform_tag,
+)
 
 
 class ReleaseMetadataTest(unittest.TestCase):
@@ -45,6 +50,12 @@ class ReleaseMetadataTest(unittest.TestCase):
                 archive.writestr("nautilus_trader/module.py", b"value = 2\n")
                 archive.writestr("nautilus_trader-1.dist-info/METADATA", b"Version: 1\n")
             self.assertNotEqual(wheel_installation_hash(first), wheel_installation_hash(second))
+
+    def test_installed_payload_excludes_interpreter_generated_files(self) -> None:
+        self.assertFalse(_installed_payload_entry("nautilus_trader/__pycache__/a.cpython-312.pyc"))
+        self.assertFalse(_installed_payload_entry("nautilus_trader/a.pyc"))
+        self.assertFalse(_installed_payload_entry("nautilus_trader/a.pyo"))
+        self.assertTrue(_installed_payload_entry("nautilus_trader/a.py"))
 
 
 if __name__ == "__main__":
