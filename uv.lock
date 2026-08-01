@@ -1590,7 +1590,7 @@ wheels = [
 
 [[package]]
 name = "nautilus-trader"
-version = "1.231.0"
+version = "1.231.0+kiwi.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -1675,7 +1675,7 @@ requires-dist = [
     { name = "portion", specifier = ">=2.6.1" },
     { name = "protobuf", marker = "extra == 'ib'", specifier = "==5.29.6" },
     { name = "py-clob-client-v2", marker = "extra == 'polymarket'", specifier = ">=1.0.2,<2.0.0" },
-    { name = "pyarrow", specifier = ">=25.0.0" },
+    { name = "pyarrow", specifier = "==25.0.0" },
     { name = "pytz", specifier = ">=2026.2" },
     { name = "simplejson", marker = "extra == 'visualization'", specifier = "==3.20.2" },
     { name = "tqdm", specifier = ">=4.68.4,<5.0.0" },

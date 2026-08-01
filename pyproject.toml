@@ -1,6 +1,6 @@
 [project]
 name = "nautilus_trader"
-version = "1.231.0"
+version = "1.231.0+kiwi.1"
 description = "Production-grade Rust-native trading engine with deterministic event-driven architecture"
 authors = [{ name = "Nautech Systems", email = "info@nautechsystems.io" }]
 classifiers = [
@@ -30,7 +30,7 @@ dependencies = [
   "numpy>=1.26.4",
   "pandas>=2.3.3,<4.0.0",
   "portion>=2.6.1",
-  "pyarrow>=25.0.0",
+  "pyarrow==25.0.0",
   "pytz>=2026.2",
   "tzdata>=2026.3",
   "tqdm>=4.68.4,<5.0.0",
@@ -39,21 +39,25 @@ dependencies = [
 
 [project.urls]
 homepage = "https://nautilustrader.io"
-repository = "https://github.com/nautechsystems/nautilus_trader"
+repository = "https://github.com/logan-xuan/kiwi-nautilus_trader"
+upstream = "https://github.com/nautechsystems/nautilus_trader"
 docs = "https://nautilustrader.io/docs"
 
 # For now we use the poetry build backend until uv supports custom build scripts
 [build-system]
 requires = [
-  "setuptools>=83",
+  "setuptools==83.0.0",
   "poetry-core==2.3.1", # Pinned to 2.3.1 for stability
-  "numpy>=1.26.4",
+  "numpy==2.5.1",
   "cython==3.2.9", # Pinned to 3.2.9 for stability
 ]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 include = [
+  # Keep the exact Kiwi fork/build declaration inside every distributed artifact.
+  { path = "KIWI_FORK.json", format = ["sdist", "wheel"] },
+  { path = "KIWI_FORK.md", format = ["sdist", "wheel"] },
   # Rust source must be included in the source distributions
   { path = "crates/*", format = "sdist" },
   { path = "Cargo.lock", format = "sdist" },

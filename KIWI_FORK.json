@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "kiwi-nautilus-fork-v1",
+  "distribution": "nautilus_trader",
+  "version": "1.231.0+kiwi.1",
+  "upstreamRepository": "https://github.com/nautechsystems/nautilus_trader.git",
+  "upstreamVersion": "1.231.0",
+  "upstreamCommit": "160f76a8d0d1067bee16ea171dcbd7e3e18b414f",
+  "forkRepository": "git@github.com:logan-xuan/kiwi-nautilus_trader.git",
+  "releaseBranch": "kiwi/1.231",
+  "vendorBranch": "vendor/1.231.0",
+  "pythonVersion": "3.12",
+  "rustToolchain": "1.97.1",
+  "precisionMode": "HIGH_PRECISION",
+  "buildDependencies": {
+    "uv": "0.11.33",
+    "poetryCore": "2.3.1",
+    "setuptools": "83.0.0",
+    "numpy": "2.5.1",
+    "wheel": "0.46.3",
+    "cython": "3.2.9",
+    "maturin": "1.14.0",
+    "pyarrow": "25.0.0"
+  },
+  "license": "LGPL-3.0-or-later",
+  "kiwiPatches": [
+    {
+      "id": "KIWI-BUILD-001",
+      "issue": "https://github.com/logan-xuan/kiwi-trade-node/issues/1",
+      "purpose": "Reproducible vendor wheel identity, exact build inputs, provenance, SBOM, and license evidence",
+      "adapterLimitation": "The Trade Node adapter cannot define or attest the vendor wheel build itself",
+      "upstreamStatus": "NOT_APPLICABLE_PACKAGING_GOVERNANCE",
+      "tests": [
+        "scripts/kiwi/test_release_metadata.py",
+        "isolated wheel install and import smoke",
+        "Kiwi wheel CI on macOS ARM64 and Linux x86_64"
+      ]
+    }
+  ]
+}

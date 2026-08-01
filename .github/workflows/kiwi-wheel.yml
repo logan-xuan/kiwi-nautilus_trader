@@ -1,0 +1,159 @@
+name: kiwi-wheel
+
+on:
+  pull_request:
+    branches: ["kiwi/1.231"]
+  push:
+    branches: ["kiwi/1.231"]
+    tags: ["kiwi/v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    name: wheel (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+          - name: macos-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate fork manifest
+        run: |
+          python3 scripts/kiwi/release_metadata.py
+          python3 scripts/kiwi/test_release_metadata.py
+
+      - name: Setup build environment
+        uses: ./.github/actions/common-setup
+        with:
+          python-version: "3.12"
+          build-type: release
+          free-disk-space: "true"
+
+      - name: Verify locked dependencies
+        run: uv lock --check
+
+      - name: Set macOS compatibility target
+        if: runner.os == 'macOS'
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+          echo "_PYTHON_HOST_PLATFORM=macosx-14.0-arm64" >> "$GITHUB_ENV"
+
+      - name: Build Kiwi wheel
+        run: uv build --wheel
+
+      - name: Apply verified macOS compatibility tag
+        if: runner.os == 'macOS'
+        run: >-
+          uvx --from wheel==0.46.3 wheel tags
+          --platform-tag=macosx_14_0_arm64 --remove
+          "$(find dist -maxdepth 1 -name 'nautilus_trader-*.whl' -print -quit)"
+
+      - name: Install and smoke test wheel
+        run: |
+          uv venv .kiwi-wheel-smoke --python 3.12
+          uv pip install --python .kiwi-wheel-smoke/bin/python dist/nautilus_trader-*.whl
+          .kiwi-wheel-smoke/bin/python -c 'import importlib.metadata; from nautilus_trader.backtest.engine import BacktestEngine; from nautilus_trader.model.data import Bar, QuoteTick, TradeTick; assert importlib.metadata.version("nautilus_trader") == "1.231.0+kiwi.1"'
+
+      - name: Run upstream deterministic matching regressions
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          uv run --locked --group test pytest -q \
+            tests/unit_tests/backtest/test_backtest_monotonic.py \
+            tests/unit_tests/backtest/test_engine_timers.py \
+            tests/unit_tests/backtest/test_fill_models.py \
+            tests/unit_tests/backtest/test_matching_engine.py
+
+      - name: Generate release metadata
+        run: python3 scripts/kiwi/release_metadata.py --wheel "$(find dist -maxdepth 1 -name 'nautilus_trader-*.whl' -print -quit)" --output "dist/kiwi-metadata-${{ matrix.name }}"
+
+      - name: Upload wheel and metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kiwi-nautilus-${{ matrix.name }}
+          path: |
+            dist/nautilus_trader-*.whl
+            dist/kiwi-metadata-${{ matrix.name }}/*
+            LICENSE
+            KIWI_FORK.json
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    name: GitHub build attestation
+    if: startsWith(github.ref, 'refs/tags/kiwi/v')
+    needs: wheel
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download verified platform artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: kiwi-nautilus-*
+          path: attestation-assets
+          merge-multiple: true
+
+      - name: Attest wheel provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: attestation-assets/nautilus_trader-*.whl
+
+  release:
+    name: immutable GitHub release
+    if: startsWith(github.ref, 'refs/tags/kiwi/v')
+    needs: [wheel, attest]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified platform artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: kiwi-nautilus-*
+          path: release-assets
+
+      - name: Assemble uniquely named release evidence
+        shell: bash
+        run: |
+          mkdir publish
+          for artifact_dir in release-assets/kiwi-nautilus-*; do
+            artifact_name="${artifact_dir##*/}"
+            find "$artifact_dir" -type f -name '*.whl' -exec cp {} publish/ \;
+            find "$artifact_dir" -type f -name '*.sha256' -exec cp {} publish/ \;
+            provenance="$(find "$artifact_dir" -type f -name 'kiwi-build-provenance.json' -print -quit)"
+            sbom="$(find "$artifact_dir" -type f -name 'kiwi-sbom.cdx.json' -print -quit)"
+            cp "$provenance" "publish/${artifact_name}-provenance.json"
+            cp "$sbom" "publish/${artifact_name}-sbom.cdx.json"
+          done
+          cp "$(find release-assets -type f -name LICENSE -print -quit)" publish/LICENSE
+          cp "$(find release-assets -type f -name KIWI_FORK.json -print -quit)" publish/KIWI_FORK.json
+
+      - name: Publish immutable wheel release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" publish/*
+          --repo "$GITHUB_REPOSITORY"
+          --verify-tag
+          --title "$GITHUB_REF_NAME"
+          --notes "Kiwi NautilusTrader vendor wheel. See KIWI_FORK.json, per-platform provenance, SBOM, SHA-256, LICENSE, and the corresponding immutable source tag."
