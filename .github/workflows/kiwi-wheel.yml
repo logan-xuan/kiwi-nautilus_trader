@@ -42,6 +42,9 @@ jobs:
       - name: Verify locked dependencies
         run: uv lock --check
 
+      - name: Install locked test dependencies without rebuilding the project
+        run: uv sync --locked --group test --no-install-project
+
       - name: Set macOS compatibility target
         run: |
           echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
@@ -65,7 +68,7 @@ jobs:
 
       - name: Run upstream deterministic matching regressions
         run: |
-          uv run --locked --group test pytest -q \
+          uv run --no-sync pytest -q \
             tests/unit_tests/backtest/test_backtest_monotonic.py \
             tests/unit_tests/backtest/test_engine_timers.py \
             tests/unit_tests/backtest/test_fill_models.py \
