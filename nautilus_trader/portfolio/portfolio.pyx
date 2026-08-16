@@ -66,6 +66,7 @@ from nautilus_trader.model.events.order cimport OrderFilled
 from nautilus_trader.model.events.order cimport OrderRejected
 from nautilus_trader.model.events.order cimport OrderUpdated
 from nautilus_trader.model.events.position cimport PositionEvent
+from nautilus_trader.model.events.position cimport PositionAdjusted
 from nautilus_trader.model.functions cimport position_side_to_str
 from nautilus_trader.model.functions cimport price_type_to_str
 from nautilus_trader.model.identifiers cimport AccountId
@@ -192,6 +193,10 @@ cdef class Portfolio(PortfolioFacade):
         self._msgbus.register(endpoint="Portfolio.update_account", handler=self.update_account)
         self._msgbus.register(endpoint="Portfolio.update_order", handler=self.update_order)
         self._msgbus.register(endpoint="Portfolio.update_position", handler=self.update_position)
+        self._msgbus.register(
+            endpoint="Portfolio.update_position_adjustment",
+            handler=self.update_position_adjustment,
+        )
 
         # Required subscriptions
         self._msgbus.subscribe(topic="events.order.*", handler=self.on_order_event, priority=10)
@@ -714,6 +719,32 @@ cdef class Portfolio(PortfolioFacade):
         if result:
             account_state = self._accounts.generate_account_state(account, event.ts_event)
             self._update_account(account_state)
+
+    cpdef void update_position_adjustment(self, PositionAdjusted adjustment):
+        """
+        Refresh portfolio-derived state after a non-fill position adjustment.
+
+        Forward splits are CASH-only and leave account balances and realized PnL unchanged,
+        so this intentionally does not synthesize an account event or perform margin updates.
+        """
+        Condition.not_none(adjustment, "adjustment")
+
+        cdef list all_positions_open = self._cache.positions_open(
+            venue=None,
+            instrument_id=adjustment.instrument_id,
+            strategy_id=None,
+            side=PositionSide.NO_POSITION_SIDE,
+            account_id=None,
+        )
+        self._update_net_position(
+            instrument_id=adjustment.instrument_id,
+            positions_open=all_positions_open,
+        )
+
+        # Derived realized/unrealized caches may have been materialized before the split.
+        # Invalidate both instead of emitting a fake fill/PositionChanged event.
+        self._realized_pnls.pop(adjustment.instrument_id, None)
+        self._unrealized_pnls.pop(adjustment.instrument_id, None)
 
     cpdef void on_order_event(self, OrderEvent event):
         """

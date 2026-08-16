@@ -127,8 +127,13 @@ cdef class BacktestEngine:
     cdef set[str] _backtest_subscription_names
     cdef dict[str, uint64_t] _last_subscription_ts
     cdef list[Data] _response_data
+    cdef bint _corporate_action_boundary_active
+    cdef bint _corporate_action_boundary_applied
+    cdef dict _forward_split_actions
+    cdef set[str] _streaming_data_sources
 
     cdef CVec _advance_time(self, uint64_t ts_now)
+    cdef Data _next_data_with_corporate_action_boundary(self)
     cdef bint _process_next_timer(self)
     cdef void _process_and_settle_venues(self, uint64_t ts_now)
     cdef void _flush_accumulator_events(self, uint64_t ts_now)
@@ -142,6 +147,13 @@ cdef class BacktestEngine:
     cdef dict _get_result_summary(self)
 
     cpdef void _handle_data_command(self, DataCommand command)
+    cpdef tuple apply_forward_split(
+        self,
+        InstrumentId instrument_id,
+        object factor,
+        str action_id,
+        uint64_t ts_event_ns,
+    )
     cdef void _handle_subscribe(self, SubscribeData command)
     cpdef void _update_subscription_data(self, str subscription_name, uint64_t request_start_ns, uint64_t request_end_ns)
     cpdef void _handle_data_response(self, DataResponse response)
@@ -183,6 +195,7 @@ cdef class BacktestDataIterator:
     cdef int _single_data_index
     cdef bint _is_single_data
     cdef dict[str, object] _data_update_function
+    cdef set[int] _pending_data_updates
 
     cdef dict[str, object] _stream_iterators
     cdef dict[str, uint64_t] _stream_current_window_start
@@ -198,6 +211,9 @@ cdef class BacktestDataIterator:
     cpdef Data next(self)
     cpdef void _push_data(self, int data_priority, int data_index)
     cpdef void _update_data(self, int data_priority)
+    cdef void _schedule_data_update(self, int data_priority)
+    cdef bint has_data_generator(self, str data_name)
+    cdef void _drain_pending_data_updates(self)
     cpdef void _reset_heap(self)
     cpdef void set_index(self, str data_name, int index)
     cpdef bint is_done(self)

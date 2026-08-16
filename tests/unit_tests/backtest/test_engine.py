@@ -1028,6 +1028,520 @@ class TestBacktestWithAddedBars:
         )
 
 
+def _cash_equity_engine_with_position(position_id: str):
+    from nautilus_trader.common.component import TestClock
+    from nautilus_trader.common.factories import OrderFactory
+    from nautilus_trader.model.identifiers import PositionId
+    from nautilus_trader.model.position import Position
+    from nautilus_trader.test_kit.stubs.events import TestEventStubs
+    from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+    engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
+    instrument = TestInstrumentProvider.equity("AAPL", "XNAS")
+    engine.add_venue(
+        venue=instrument.id.venue,
+        oms_type=OmsType.HEDGING,
+        account_type=AccountType.CASH,
+        base_currency=USD,
+        starting_balances=[Money(1_000_000, USD)],
+        fill_model=FillModel(),
+    )
+    engine.add_instrument(instrument)
+    order = OrderFactory(
+        trader_id=TestIdStubs.trader_id(),
+        strategy_id=TestIdStubs.strategy_id(),
+        clock=TestClock(),
+    ).market(instrument.id, OrderSide.BUY, Quantity.from_int(25))
+    fill = TestEventStubs.order_filled(
+        order,
+        instrument=instrument,
+        position_id=PositionId(position_id),
+        last_px=Price.from_str("150.13"),
+    )
+    position = Position(instrument=instrument, fill=fill)
+    engine.kernel.cache.add_position(position, OmsType.HEDGING)
+    return engine, instrument, position
+
+
+class TestBacktestEngineForwardSplit:
+    def test_flat_split_registration_makes_later_duplicate_a_noop(self):
+        """A flat action is registered, so replay cannot adjust a subsequently opened position."""
+        from nautilus_trader.common.component import TestClock
+        from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.model.identifiers import PositionId
+        from nautilus_trader.model.position import Position
+        from nautilus_trader.test_kit.stubs.events import TestEventStubs
+        from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+        engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
+        instrument = TestInstrumentProvider.equity("AAPL", "XNAS")
+        engine.add_venue(
+            venue=instrument.id.venue,
+            oms_type=OmsType.HEDGING,
+            account_type=AccountType.CASH,
+            base_currency=USD,
+            starting_balances=[Money(1_000_000, USD)],
+            fill_model=FillModel(),
+        )
+        engine.add_instrument(instrument)
+        positions = []
+
+        def native_batches():
+            assert engine.apply_forward_split(instrument.id, 2, "aapl-flat", 1) == ()
+            order = OrderFactory(
+                trader_id=TestIdStubs.trader_id(),
+                strategy_id=TestIdStubs.strategy_id(),
+                clock=TestClock(),
+            ).market(instrument.id, OrderSide.BUY, Quantity.from_int(25))
+            fill = TestEventStubs.order_filled(
+                order,
+                instrument=instrument,
+                position_id=PositionId("P-SPLIT-FLAT"),
+                last_px=Price.from_str("150.13"),
+            )
+            position = Position(instrument=instrument, fill=fill)
+            engine.kernel.cache.add_position(position, OmsType.HEDGING)
+            positions.append(position)
+            assert engine.apply_forward_split(instrument.id, 2, "aapl-flat", 1) == ()
+            yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("native_batches", native_batches())
+
+            assert len(positions) == 1
+            assert positions[0].quantity == Quantity.from_int(25)
+            assert positions[0].avg_px_open == pytest.approx(150.13)
+            assert positions[0].adjustments == []
+        finally:
+            engine.dispose()
+
+    @pytest.mark.parametrize(
+        ("instrument", "account_type", "message"),
+        [
+            (TestInstrumentProvider.equity("AAPL", "XNAS"), AccountType.MARGIN, "CASH accounts"),
+            (TestInstrumentProvider.future(), AccountType.CASH, "Equity instruments"),
+        ],
+    )
+    def test_forward_split_rejects_unsupported_instrument_or_account(
+        self,
+        instrument,
+        account_type,
+        message,
+    ):
+        """MARGIN and non-equity instruments are rejected before any split registration."""
+        engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
+        engine.add_venue(
+            venue=instrument.id.venue,
+            oms_type=OmsType.HEDGING,
+            account_type=account_type,
+            base_currency=USD,
+            starting_balances=[Money(1_000_000, USD)],
+            fill_model=FillModel(),
+        )
+        engine.add_instrument(instrument)
+
+        def native_batches():
+            with pytest.raises(ValueError, match=message):
+                engine.apply_forward_split(instrument.id, 2, "unsupported", 1)
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("native_batches", native_batches())
+        finally:
+            engine.dispose()
+
+    def test_forward_split_overflow_preflight_leaves_all_positions_unchanged(self):
+        """A later overflowing position must prevent an earlier position from being adjusted."""
+        from nautilus_trader.common.component import TestClock
+        from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.model.identifiers import PositionId
+        from nautilus_trader.model.position import Position
+        from nautilus_trader.test_kit.stubs.events import TestEventStubs
+        from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+        engine, instrument, ordinary_position = _cash_equity_engine_with_position("P-SPLIT-NORMAL")
+        order = OrderFactory(
+            trader_id=TestIdStubs.trader_id(),
+            strategy_id=TestIdStubs.strategy_id(),
+            clock=TestClock(),
+        ).market(instrument.id, OrderSide.BUY, Quantity.from_int(34_028_236_692_093))
+        fill = TestEventStubs.order_filled(
+            order,
+            instrument=instrument,
+            position_id=PositionId("P-SPLIT-OVERFLOW"),
+            # Keep the test fill's notional below MONEY_MAX while its quantity remains at
+            # QUANTITY_MAX, which must fail split preflight before any commit occurs.
+            last_px=Price.from_str("0.01"),
+        )
+        overflowing_position = Position(instrument=instrument, fill=fill)
+        engine.kernel.cache.add_position(overflowing_position, OmsType.HEDGING)
+        original_quantities = (ordinary_position.quantity, overflowing_position.quantity)
+        original_events = (ordinary_position.event_count, overflowing_position.event_count)
+
+        def native_batches():
+            with pytest.raises(OverflowError, match="raw quantity maximum"):
+                engine.apply_forward_split(instrument.id, 2, "aapl-overflow", 1)
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("native_batches", native_batches())
+
+            assert (ordinary_position.quantity, overflowing_position.quantity) == original_quantities
+            assert (ordinary_position.event_count, overflowing_position.event_count) == original_events
+            assert ordinary_position.adjustments == []
+            assert overflowing_position.adjustments == []
+        finally:
+            engine.dispose()
+
+    def test_streaming_split_runs_after_last_chunk_bar_settlement_and_reset_replays(self):
+        """The stream resumes for an action only after the previous chunk's final bar settled."""
+        from nautilus_trader.common.component import TestClock
+        from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.model.identifiers import PositionId
+        from nautilus_trader.model.position import Position
+        from nautilus_trader.test_kit.stubs.events import TestEventStubs
+        from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+        engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
+        instrument = TestInstrumentProvider.equity("AAPL", "XNAS")
+        engine.add_venue(
+            venue=instrument.id.venue,
+            oms_type=OmsType.HEDGING,
+            account_type=AccountType.CASH,
+            base_currency=USD,
+            starting_balances=[Money(1_000_000, USD)],
+            fill_model=FillModel(),
+        )
+        engine.add_instrument(instrument)
+
+        def add_open_position(position_id: str) -> Position:
+            order_factory = OrderFactory(
+                trader_id=TestIdStubs.trader_id(),
+                strategy_id=TestIdStubs.strategy_id(),
+                clock=TestClock(),
+            )
+            order = order_factory.market(instrument.id, OrderSide.BUY, Quantity.from_int(25))
+            fill = TestEventStubs.order_filled(
+                order,
+                instrument=instrument,
+                position_id=PositionId(position_id),
+                last_px=Price.from_str("150.13"),
+            )
+            position = Position(instrument=instrument, fill=fill)
+            engine.kernel.cache.add_position(position, OmsType.HEDGING)
+            return position
+
+        first_position = add_open_position("P-SPLIT-1")
+        adjustments = []
+        first_ts = 1_000
+
+        def native_batches():
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=first_ts)]
+            settled = engine.kernel.cache.quote_tick(instrument.id)
+            assert settled is not None
+            assert settled.ts_init == first_ts
+            adjustments.extend(
+                engine.apply_forward_split(
+                    instrument.id,
+                    4,
+                    "aapl-2026-08-16",
+                    first_ts + 1,
+                ),
+            )
+            yield [TestDataStubs.quote_tick(instrument, 37.50, 37.51, ts_init=first_ts + 2)]
+            assert (
+                engine.apply_forward_split(
+                    instrument.id,
+                    4,
+                    "aapl-2026-08-16",
+                    first_ts + 1,
+                )
+                == ()
+            )
+            with pytest.raises(ValueError, match="conflicting duplicate"):
+                engine.apply_forward_split(
+                    instrument.id,
+                    2,
+                    "aapl-2026-08-16",
+                    first_ts + 1,
+                )
+            assert first_position.quantity == Quantity.from_int(100)
+
+        try:
+            engine.add_data_iterator("native_batches", native_batches())
+            engine.run()
+
+            assert len(adjustments) == 1
+            assert first_position.quantity == Quantity.from_int(100)
+            assert first_position.avg_px_open == pytest.approx(37.5325)
+            assert engine.portfolio.net_position(instrument.id) == Decimal(100)
+
+            engine.reset()
+            replay_position = add_open_position("P-SPLIT-2")
+            replay_adjustments = []
+
+            def replay_native_batches():
+                replay_adjustments.extend(
+                    engine.apply_forward_split(
+                        instrument.id,
+                        2,
+                        "aapl-2026-08-16",
+                        first_ts + 10,
+                    ),
+                )
+                yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=first_ts + 11)]
+
+            engine.add_data_iterator("native_batches", replay_native_batches())
+            assert len(replay_adjustments) == 1
+            assert replay_position.quantity == Quantity.from_int(50)
+        finally:
+            engine.dispose()
+
+    def test_forward_split_rejects_nonclosed_order_without_partial_position_mutation(self):
+        """A target-instrument open order rejects the whole multi-position adjustment."""
+        from nautilus_trader.common.component import TestClock
+        from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.model.identifiers import PositionId
+        from nautilus_trader.model.position import Position
+        from nautilus_trader.test_kit.stubs.events import TestEventStubs
+        from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+        engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
+        instrument = TestInstrumentProvider.equity("AAPL", "XNAS")
+        engine.add_venue(
+            venue=instrument.id.venue,
+            oms_type=OmsType.HEDGING,
+            account_type=AccountType.CASH,
+            base_currency=USD,
+            starting_balances=[Money(1_000_000, USD)],
+            fill_model=FillModel(),
+        )
+        engine.add_instrument(instrument)
+        order_factory = OrderFactory(
+            trader_id=TestIdStubs.trader_id(),
+            strategy_id=TestIdStubs.strategy_id(),
+            clock=TestClock(),
+        )
+
+        def make_position(position_id: str, side: OrderSide) -> Position:
+            order = order_factory.market(instrument.id, side, Quantity.from_int(25))
+            fill = TestEventStubs.order_filled(
+                order,
+                instrument=instrument,
+                position_id=PositionId(position_id),
+                last_px=Price.from_str("150.13"),
+            )
+            position = Position(instrument=instrument, fill=fill)
+            engine.kernel.cache.add_position(position, OmsType.HEDGING)
+            return position
+
+        long_position = make_position("P-SPLIT-LONG", OrderSide.BUY)
+        short_position = make_position("P-SPLIT-SHORT", OrderSide.SELL)
+        long_events = long_position.event_count
+        short_events = short_position.event_count
+        open_order = order_factory.market(instrument.id, OrderSide.BUY, Quantity.from_int(1))
+        engine.kernel.cache.add_order(open_order, position_id=long_position.id)
+
+        def native_batches():
+            with pytest.raises(RuntimeError, match="non-closed order"):
+                engine.apply_forward_split(instrument.id, 4, "aapl-open-order", 1)
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("native_batches", native_batches())
+
+            assert long_position.quantity == Quantity.from_int(25)
+            assert short_position.quantity == Quantity.from_int(25)
+            assert long_position.avg_px_open == pytest.approx(150.13)
+            assert short_position.avg_px_open == pytest.approx(150.13)
+            assert long_position.event_count == long_events
+            assert short_position.event_count == short_events
+            assert long_position.adjustments == []
+            assert short_position.adjustments == []
+        finally:
+            engine.dispose()
+
+    def test_forward_split_rejects_pending_local_command_without_mutation(self):
+        """A queued cancel command rejects the split before its later exchange processing."""
+        from nautilus_trader.core.uuid import UUID4
+        from nautilus_trader.execution.messages import CancelOrder
+        from nautilus_trader.model.identifiers import ClientOrderId
+
+        engine, instrument, position = _cash_equity_engine_with_position("P-SPLIT-PENDING-COMMAND")
+        original_event_count = position.event_count
+
+        def native_batches():
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=1)]
+            execution_client = next(iter(engine.kernel.exec_engine._clients.values()))
+            execution_client.cancel_order(
+                CancelOrder(
+                    trader_id=position.trader_id,
+                    strategy_id=position.strategy_id,
+                    instrument_id=instrument.id,
+                    client_order_id=ClientOrderId("O-SPLIT-PENDING-COMMAND"),
+                    venue_order_id=None,
+                    command_id=UUID4(),
+                    ts_init=1,
+                ),
+            )
+            with pytest.raises(RuntimeError, match="local command is pending"):
+                engine.apply_forward_split(instrument.id, 2, "aapl-pending-command", 1)
+            yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("native_batches", native_batches())
+            engine.run()
+
+            assert position.quantity == Quantity.from_int(25)
+            assert position.avg_px_open == pytest.approx(150.13)
+            assert position.event_count == original_event_count
+            assert position.adjustments == []
+        finally:
+            engine.dispose()
+
+    def test_forward_split_rejects_calls_outside_iterator_boundary(self):
+        """The public API cannot be invoked by ordinary user or strategy code."""
+        from nautilus_trader.common.component import TestClock
+        from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.model.identifiers import PositionId
+        from nautilus_trader.model.position import Position
+        from nautilus_trader.test_kit.stubs.events import TestEventStubs
+        from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+        engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
+        instrument = TestInstrumentProvider.equity("AAPL", "XNAS")
+        engine.add_venue(
+            venue=instrument.id.venue,
+            oms_type=OmsType.HEDGING,
+            account_type=AccountType.CASH,
+            base_currency=USD,
+            starting_balances=[Money(1_000_000, USD)],
+            fill_model=FillModel(),
+        )
+        engine.add_instrument(instrument)
+        order = OrderFactory(
+            trader_id=TestIdStubs.trader_id(),
+            strategy_id=TestIdStubs.strategy_id(),
+            clock=TestClock(),
+        ).market(instrument.id, OrderSide.BUY, Quantity.from_int(25))
+        fill = TestEventStubs.order_filled(
+            order,
+            instrument=instrument,
+            position_id=PositionId("P-SPLIT-BOUNDARY"),
+            last_px=Price.from_str("150.13"),
+        )
+        position = Position(instrument=instrument, fill=fill)
+        engine.kernel.cache.add_position(position, OmsType.HEDGING)
+
+        try:
+            with pytest.raises(RuntimeError, match="controlled data-iterator"):
+                engine.apply_forward_split(instrument.id, 4, "aapl-outside-boundary", 1)
+
+            assert position.quantity == Quantity.from_int(25)
+            assert position.adjustments == []
+        finally:
+            engine.dispose()
+
+    def test_forward_split_rejects_second_stream_initial_boundary_without_mutation(self):
+        """The second initial generator cannot advance a clock before an unseen peer stream."""
+        engine, instrument, position = _cash_equity_engine_with_position("P-SPLIT-SECOND-INIT")
+
+        def first_source():
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=1)]
+
+        def second_source():
+            with pytest.raises(RuntimeError, match="exactly one registered streaming data source"):
+                engine.apply_forward_split(instrument.id, 2, "second-initial", 2)
+            yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("first-source", first_source())
+            engine.add_data_iterator("second-source", second_source())
+
+            assert position.quantity == Quantity.from_int(25)
+            assert position.avg_px_open == pytest.approx(150.13)
+            assert position.adjustments == []
+        finally:
+            engine.dispose()
+
+    def test_rejected_second_stream_initial_generator_does_not_poison_single_stream(self):
+        """A rejected initial second stream is rolled back before the original stream refills."""
+        engine, instrument, position = _cash_equity_engine_with_position("P-SPLIT-INIT-ROLLBACK")
+        adjustments = []
+
+        def first_source():
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=1)]
+            adjustments.extend(
+                engine.apply_forward_split(instrument.id, 2, "single-after-reject", 2),
+            )
+            yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=3)]
+
+        def rejected_second_source():
+            engine.apply_forward_split(instrument.id, 2, "second-initial", 2)
+            yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("first-source", first_source())
+            with pytest.raises(RuntimeError, match="exactly one registered streaming data source"):
+                engine.add_data_iterator("rejected-second-source", rejected_second_source())
+            engine.run()
+
+            assert len(adjustments) == 1
+            assert position.quantity == Quantity.from_int(50)
+            assert position.avg_px_open == pytest.approx(75.065)
+        finally:
+            engine.dispose()
+
+    def test_empty_stream_does_not_count_as_a_second_stream(self):
+        """An empty initial generator is discarded so a real single stream can split."""
+        engine, instrument, position = _cash_equity_engine_with_position("P-SPLIT-EMPTY-STREAM")
+        adjustments = []
+
+        def empty_source():
+            if False:
+                yield []
+
+        def single_source():
+            adjustments.extend(
+                engine.apply_forward_split(instrument.id, 2, "single-after-empty", 1),
+            )
+            yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("empty-source", empty_source())
+            engine.add_data_iterator("single-source", single_source())
+
+            assert len(adjustments) == 1
+            assert position.quantity == Quantity.from_int(50)
+            assert position.avg_px_open == pytest.approx(75.065)
+        finally:
+            engine.dispose()
+
+    def test_forward_split_rejects_multi_stream_refill_boundary_without_mutation(self):
+        """A deferred refill cannot split while another stream may still yield older data."""
+        engine, instrument, position = _cash_equity_engine_with_position("P-SPLIT-MULTI-REFILL")
+
+        def first_source():
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=1)]
+            with pytest.raises(RuntimeError, match="exactly one registered streaming data source"):
+                engine.apply_forward_split(instrument.id, 2, "multi-refill", 2)
+            yield [TestDataStubs.quote_tick(instrument, 75.00, 75.01, ts_init=3)]
+
+        def second_source():
+            yield [TestDataStubs.quote_tick(instrument, 149.00, 149.01, ts_init=2)]
+
+        try:
+            engine.add_data_iterator("first-source", first_source())
+            engine.add_data_iterator("second-source", second_source())
+            engine.run()
+
+            assert position.quantity == Quantity.from_int(25)
+            assert position.avg_px_open == pytest.approx(150.13)
+            assert position.adjustments == []
+        finally:
+            engine.dispose()
+
+
 class TestBacktestEngineStreaming:
     """
     Integration tests for BacktestEngine streaming functionality.

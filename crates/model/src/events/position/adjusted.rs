@@ -30,6 +30,7 @@ use crate::{
 /// order fills, such as:
 /// - Commission adjustments that affect the actual quantity held (e.g., crypto spot commissions)
 /// - Funding payments that affect realized PnL (e.g., perpetual futures funding)
+/// - Forward stock splits represented as `stock_split:v1:<action_id>:<factor>`.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -151,22 +152,51 @@ mod tests {
         )
     }
 
+    fn create_test_split_adjustment() -> PositionAdjusted {
+        PositionAdjusted::new(
+            TraderId::from("TRADER-001"),
+            StrategyId::from("EMA-CROSS"),
+            InstrumentId::from("AAPL.XNAS"),
+            PositionId::from("P-003"),
+            AccountId::from("XNAS-001"),
+            PositionAdjustmentType::Split,
+            Some(Decimal::from(75)),
+            None,
+            Some(Ustr::from("stock_split:v1:aapl-2026-08-16:4")),
+            UUID4::default(),
+            UnixNanos::from(1_000_000_000),
+            UnixNanos::from(2_000_000_000),
+        )
+    }
+
     #[rstest]
     fn test_position_adjustment_different_types() {
         let commission = create_test_commission_adjustment();
         let funding = create_test_funding_adjustment();
+        let split = create_test_split_adjustment();
 
         assert_eq!(
             commission.adjustment_type,
             PositionAdjustmentType::Commission
         );
         assert_eq!(funding.adjustment_type, PositionAdjustmentType::Funding);
+        assert_eq!(split.adjustment_type, PositionAdjustmentType::Split);
         assert_ne!(commission.adjustment_type, funding.adjustment_type);
     }
 
     #[rstest]
     fn test_position_adjustment_serialization() {
         let original = create_test_commission_adjustment();
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: PositionAdjusted = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(original, deserialized);
+    }
+
+    #[rstest]
+    fn test_stock_split_adjustment_serialization() {
+        let original = create_test_split_adjustment();
 
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: PositionAdjusted = serde_json::from_str(&json).unwrap();

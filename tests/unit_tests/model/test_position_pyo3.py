@@ -1193,6 +1193,47 @@ def test_position_adjustment_creation_and_serialization() -> None:
     assert adj_dict["reason"] == "test_order_id"
 
 
+def test_forward_split_adjustment_supports_sub_tick_cost_basis() -> None:
+    instrument = TestInstrumentProviderPyo3.aapl_equity()
+    order = TestOrderProviderPyo3.market_order(
+        instrument.id,
+        OrderSide.BUY,
+        Quantity.from_int(25),
+    )
+    fill = TestEventsProviderPyo3.order_filled(
+        order,
+        instrument=instrument,
+        position_id=PositionId("P-SPLIT"),
+        strategy_id=TestIdProviderPyo3.strategy_id(),
+        last_px=Price.from_str("150.13"),
+    )
+    position = Position(instrument=instrument, fill=fill)
+    fill_count = len(position.events())
+
+    adjustment = PositionAdjusted(
+        trader_id=TestIdProviderPyo3.trader_id(),
+        strategy_id=TestIdProviderPyo3.strategy_id(),
+        instrument_id=instrument.id,
+        position_id=position.id,
+        account_id=TestIdProviderPyo3.account_id(),
+        adjustment_type=PositionAdjustmentType.SPLIT,
+        quantity_change=Decimal(75),
+        pnl_change=None,
+        reason="stock_split:v1:aapl-2026-08-16:4",
+        event_id=TestIdProviderPyo3.uuid(),
+        ts_event=1_000_000_000,
+        ts_init=1_000_000_000,
+    )
+
+    position.apply_adjustment(adjustment)
+
+    assert position.quantity == Quantity.from_int(100)
+    assert position.signed_qty == 100.0
+    assert position.avg_px_open == pytest.approx(37.5325)
+    assert len(position.events()) == fill_count
+    assert position.adjustments()[-1].adjustment_type == PositionAdjustmentType.SPLIT
+
+
 def test_position_with_adjustments_tracking() -> None:
     # Arrange
     instrument = TestInstrumentProviderPyo3.btcusdt_binance()

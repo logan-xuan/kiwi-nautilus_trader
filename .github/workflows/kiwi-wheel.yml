@@ -64,7 +64,7 @@ jobs:
         run: |
           uv venv .kiwi-wheel-smoke --python 3.12
           uv pip install --python .kiwi-wheel-smoke/bin/python dist/nautilus_trader-*.whl
-          .kiwi-wheel-smoke/bin/python -c 'import importlib.metadata, json; from nautilus_trader.backtest.engine import BacktestEngine; from nautilus_trader.model.data import Bar, QuoteTick, TradeTick; assert importlib.metadata.version("nautilus_trader") == json.load(open("KIWI_FORK.json"))["version"]'
+          .kiwi-wheel-smoke/bin/python scripts/kiwi/wheel_forward_split_smoke.py
 
       - name: Run upstream deterministic matching regressions
         run: |

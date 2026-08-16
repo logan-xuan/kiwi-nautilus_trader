@@ -57,6 +57,7 @@ from nautilus_trader.backtest.models cimport LatencyModel
 from nautilus_trader.backtest.models cimport MakerTakerFeeModel
 from nautilus_trader.backtest.modules cimport SimulationModule
 from nautilus_trader.cache.base cimport CacheFacade
+from nautilus_trader.cache.cache cimport Cache
 from nautilus_trader.common.actor cimport Actor
 from nautilus_trader.common.component cimport FORCE_STOP
 from nautilus_trader.common.component cimport LOGGING_PYO3
@@ -170,6 +171,8 @@ from nautilus_trader.model.events.order cimport OrderModifyRejected
 from nautilus_trader.model.events.order cimport OrderRejected
 from nautilus_trader.model.events.order cimport OrderTriggered
 from nautilus_trader.model.events.order cimport OrderUpdated
+from nautilus_trader.model.events.position cimport PositionAdjusted
+from nautilus_trader.model.events.position cimport PositionAdjustmentType
 from nautilus_trader.model.functions cimport account_type_to_str
 from nautilus_trader.model.functions cimport aggressor_side_to_str
 from nautilus_trader.model.functions cimport book_type_to_str
@@ -275,6 +278,10 @@ cdef class BacktestEngine:
         self._backtest_subscription_names = set()
         self._response_data = []
         self._data_iterator = BacktestDataIterator()
+        self._corporate_action_boundary_active = False
+        self._corporate_action_boundary_applied = False
+        self._forward_split_actions = {}
+        self._streaming_data_sources = set()
         self._kernel.msgbus.register(endpoint="BacktestEngine.execute", handler=self._handle_data_command)
 
     def __del__(self) -> None:
@@ -487,6 +494,171 @@ cdef class BacktestEngine:
 
         """
         return self._kernel.get_log_guard()
+
+    cpdef tuple apply_forward_split(
+        self,
+        InstrumentId instrument_id,
+        object factor,
+        str action_id,
+        uint64_t ts_event_ns,
+    ):
+        """
+        Atomically apply an integer forward split to all open CASH equity positions.
+
+        This API is deliberately only available while a ``BacktestDataIterator`` is resumed
+        at the controlled, post-settlement corporate-action boundary. It rejects every order,
+        command, matching queue, MOO, margin, and backing-cache state which could make a
+        position adjustment non-atomic.
+        """
+        cdef:
+            Cache cache
+            MessageBus msgbus
+            Instrument instrument
+            SimulatedExchange exchange
+            OrderMatchingEngine matching_engine
+            Position position
+            PositionAdjusted adjustment
+            Order order
+            TradingCommand command
+            object queued
+            object existing
+            object factor_py
+            object quantity_change
+            list positions
+            list prepared = []
+            list result = []
+            tuple action_key
+            CVec raw_handlers
+
+        Condition.not_none(instrument_id, "instrument_id")
+        Condition.not_none(action_id, "action_id")
+
+        if not self._corporate_action_boundary_active:
+            raise RuntimeError(
+                "apply_forward_split is only permitted from the controlled data-iterator corporate-action boundary",
+            )
+        if len(self._streaming_data_sources) != 1:
+            raise RuntimeError(
+                "apply_forward_split requires exactly one registered streaming data source",
+            )
+        if not action_id or ":" in action_id:
+            raise ValueError("stock split action_id must be non-empty and cannot contain ':'")
+        if type(factor) is not int:
+            raise TypeError("stock split factor must be an integer")
+        factor_py = factor
+        if factor_py < 2 or factor_py > 18446744073709551615:
+            raise ValueError("stock split factor must be an integer in [2, 2^64 - 1]")
+
+        # The idempotency check must precede timestamp advancement. A replay can re-submit an
+        # already-applied action after the engine clock has moved on, and must still be a no-op.
+        action_key = (instrument_id, action_id)
+        existing = self._forward_split_actions.get(action_key)
+        if existing is not None:
+            if existing == (factor_py, ts_event_ns):
+                return ()
+            raise ValueError("conflicting duplicate stock split action")
+
+        # A corporate action may be effective between the settled prior data event and the
+        # next event returned by a streaming iterator. Advance all clocks and settle timers
+        # before the action, but never expose this API while timer/strategy callbacks run.
+        if ts_event_ns < self._kernel.clock.timestamp_ns():
+            raise ValueError("stock split timestamp cannot precede the current backtest clock")
+        if ts_event_ns > self._kernel.clock.timestamp_ns():
+            self._corporate_action_boundary_active = False
+            try:
+                raw_handlers = self._advance_time(ts_event_ns)
+                try:
+                    self._process_raw_time_event_handlers(raw_handlers, ts_event_ns, only_now=True)
+                finally:
+                    if raw_handlers.ptr != NULL:
+                        vec_time_event_handlers_drop(raw_handlers)
+                self._process_and_settle_venues(ts_event_ns)
+            finally:
+                self._corporate_action_boundary_active = True
+            self._last_ns = ts_event_ns
+
+        cache = <Cache>self._kernel.cache
+        msgbus = <MessageBus>self._kernel.msgbus
+        if cache.has_backing:
+            raise RuntimeError("stock split is unsupported when the cache has a backing database")
+        instrument = cache.instrument(instrument_id)
+        if instrument is None:
+            raise ValueError(f"no instrument registered for stock split: {instrument_id}")
+        if not isinstance(instrument, Equity):
+            raise ValueError("stock split is only supported for Equity instruments")
+
+        exchange = self._venues.get(instrument_id.venue)
+        if exchange is None:
+            raise ValueError(f"no simulated exchange registered for stock split venue: {instrument_id.venue}")
+        if exchange.account_type != AccountType.CASH:
+            raise ValueError("stock split is only supported for CASH accounts")
+
+        # Any non-terminal order, including emulated, local, inflight, or pending commands,
+        # makes an in-place position adjustment unsafe.
+        for order in cache.orders(None, instrument_id):
+            if not order.is_closed_c():
+                raise RuntimeError("stock split rejected while a non-closed order exists")
+        for command in exchange._message_queue:
+            if command.instrument_id == instrument_id:
+                raise RuntimeError("stock split rejected while a local command is pending")
+        for queued in exchange._inflight_queue:
+            command = queued[1]
+            if command.instrument_id == instrument_id:
+                raise RuntimeError("stock split rejected while an inflight command exists")
+
+        matching_engine = exchange._matching_engines.get(instrument_id)
+        if matching_engine is not None:
+            if (
+                matching_engine._market_on_open_orders
+                or matching_engine._queue_ahead
+                or matching_engine._queue_excess
+                or matching_engine._queue_pending
+                or matching_engine._cached_filled_qty
+            ):
+                raise RuntimeError("stock split rejected while matching-engine queue or MOO state exists")
+
+        positions = cache.positions_open(None, instrument_id)
+        for position in positions:
+            position.validate_forward_split_c(<uint64_t>factor_py)
+            quantity_change = position.quantity.as_decimal() * (factor_py - 1)
+            if position.side == PositionSide.SHORT:
+                quantity_change = -quantity_change
+            adjustment = PositionAdjusted(
+                trader_id=position.trader_id,
+                strategy_id=position.strategy_id,
+                instrument_id=instrument_id,
+                position_id=position.id,
+                account_id=position.account_id,
+                adjustment_type=PositionAdjustmentType.SPLIT,
+                quantity_change=quantity_change,
+                pnl_change=None,
+                reason=f"stock_split:v1:{action_id}:{factor_py}",
+                event_id=UUID4(),
+                ts_event=ts_event_ns,
+                ts_init=self._kernel.clock.timestamp_ns(),
+            )
+            prepared.append((position, adjustment))
+
+        # All validations and event construction complete: commit every position, then refresh
+        # cache and portfolio-derived state. No fill, order, account, or fee event is generated.
+        for position, adjustment in prepared:
+            position.apply_forward_split_c(adjustment, <uint64_t>factor_py)
+            cache.update_position(position)
+            result.append(adjustment)
+
+        self._forward_split_actions[action_key] = (factor_py, ts_event_ns)
+        self._corporate_action_boundary_applied = True
+        for adjustment in result:
+            msgbus.send(
+                endpoint="Portfolio.update_position_adjustment",
+                msg=adjustment,
+            )
+            msgbus.publish_c(
+                topic=f"events.position_adjusted.{adjustment.strategy_id}",
+                msg=adjustment,
+            )
+
+        return tuple(result)
 
     def list_venues(self) -> list[Venue]:
         """
@@ -943,11 +1115,41 @@ cdef class BacktestEngine:
         The generator should yield ``list[Data]`` objects sorted by `ts_init` timestamp.
 
         """
-        self._data_iterator.init_data(
-            data_name,
-            generator,
-            append_data=True
-        )
+        cdef BacktestDataIterator iterator = self._data_iterator
+
+        # ``init_data`` resumes a streaming generator for its initial chunk. Treat this
+        # exactly like the later ``BacktestDataIterator.next`` recovery point: before any
+        # market data has been admitted there is no prior event to settle, but it is still
+        # the sole controlled place where a stream may apply an effective-at-open action.
+        # Count the source before resuming its initial generator. This means a second
+        # source is already visible to an action attempted from that generator's first
+        # yield, while a genuinely single source remains permitted at its initial boundary.
+        cdef bint was_streaming = data_name in self._streaming_data_sources
+
+        self._streaming_data_sources.add(data_name)
+        self._corporate_action_boundary_active = True
+        self._corporate_action_boundary_applied = False
+        try:
+            iterator.init_data(
+                data_name,
+                generator,
+                append_data=True,
+            )
+        except:
+            # ``init_data`` resumes the generator. If that recovery point rejects a
+            # corporate action (or otherwise fails), do not let an unregistered new
+            # stream permanently turn the original stream into a multi-stream setup.
+            if not was_streaming:
+                self._streaming_data_sources.discard(data_name)
+            raise
+        finally:
+            self._corporate_action_boundary_active = False
+
+        # Empty and immediately-exhausted generators do not become iterator streams.
+        # Keep any existing name intact, but remove a name first introduced by a stream
+        # which never registered a refill function.
+        if not was_streaming and not iterator.has_data_generator(data_name):
+            self._streaming_data_sources.discard(data_name)
 
         self._log.info(f"Added {data_name} stream generator")
 
@@ -1238,6 +1440,10 @@ cdef class BacktestEngine:
 
         # Reset timing
         self._iteration = 0
+        self._corporate_action_boundary_active = False
+        self._corporate_action_boundary_applied = False
+        self._forward_split_actions.clear()
+        self._streaming_data_sources.clear()
         self._data_iterator = BacktestDataIterator()
 
         if self._sorted:
@@ -1270,6 +1476,7 @@ cdef class BacktestEngine:
         self._has_book_data.clear()
         self._data.clear()
         self._data_len = 0
+        self._streaming_data_sources.clear()
         self._data_iterator = BacktestDataIterator()
         self._sorted = True
 
@@ -1655,13 +1862,14 @@ cdef class BacktestEngine:
         raw_handlers.ptr = NULL
         raw_handlers.len = 0
         raw_handlers.cap = 0
-        cdef Data data = self._data_iterator.next()
+        cdef Data data = self._next_data_with_corporate_action_boundary()
 
         # Initialize _last_ns to ensure timers before first data are processed.
         # For no-data backtests, start_ns allows _process_next_timer to work correctly.
         if data is not None:
-            self._last_ns = data.ts_init - 1 if data.ts_init > 0 else 0
-        else:
+            if not self._corporate_action_boundary_applied:
+                self._last_ns = data.ts_init - 1 if data.ts_init > 0 else 0
+        elif not self._corporate_action_boundary_applied:
             self._last_ns = start_ns
 
         try:
@@ -1676,7 +1884,7 @@ cdef class BacktestEngine:
                         # and timers will fire naturally as time advances.
                         break
                     done = self._process_next_timer()
-                    data = self._data_iterator.next()
+                    data = self._next_data_with_corporate_action_boundary()
                     if data is None and done:
                         break
 
@@ -1726,7 +1934,7 @@ cdef class BacktestEngine:
                 # Process all exchange messages
                 self._process_and_settle_venues(data.ts_init)
 
-                data = self._data_iterator.next()
+                data = self._next_data_with_corporate_action_boundary()
                 if data is None or data.ts_init > self._last_ns:
                     self._process_raw_time_event_handlers(
                         raw_handlers,
@@ -1761,6 +1969,15 @@ cdef class BacktestEngine:
             self._flush_accumulator_events(self._last_ns)
         else:
             self._flush_accumulator_events(end_ns)
+
+    cdef Data _next_data_with_corporate_action_boundary(self):
+        """Resume the data iterator with the only public corporate-action call window open."""
+        self._corporate_action_boundary_active = True
+        self._corporate_action_boundary_applied = False
+        try:
+            return self._data_iterator.next()
+        finally:
+            self._corporate_action_boundary_active = False
 
     cdef CVec _advance_time(self, uint64_t ts_now):
         # Advance clocks and process all events before ts_now in timestamp order.
@@ -1923,7 +2140,9 @@ cdef class BacktestEngine:
                 for matching_engine in exchange._matching_engines.values():
                     matching_engine.iterate(ts_now)
 
-        # Run modules and expirations once after all commands are settled
+        # Run modules and expirations once after all commands are settled. Corporate actions
+        # are intentionally *not* permitted from these callbacks; they use the iterator
+        # recovery boundary after this settlement and before the next market event is fed.
         for exchange in self._venues.values():
             for module in exchange.modules:
                 module.process(ts_now)
@@ -2325,6 +2544,7 @@ cdef class BacktestDataIterator:
         self._data_len = {} # key=data_priority, value=len(data_list)
         self._data_index = {} # key=data_priority, value=current index of data_list
         self._data_update_function = {} # key=data_priority, value=data_update_function, Callable[[], list] | None
+        self._pending_data_updates = set()
 
         self._heap = []
         # Counter for assigning priorities to data streams.
@@ -2499,6 +2719,7 @@ cdef class BacktestDataIterator:
             return
 
         cdef int data_priority = self._data_priority[data_name]
+        self._pending_data_updates.discard(data_priority)
         del self._data[data_priority]
         del self._data_name[data_priority]
         del self._data_priority[data_name]
@@ -2578,6 +2799,12 @@ cdef class BacktestDataIterator:
             int cursor
             Data object_to_return
 
+        # A stream generator is resumed only when the engine asks for the *next* data item.
+        # In particular, do not prefetch a new chunk while returning the final item from the
+        # current chunk: that item must first be processed and its venue settled. This creates
+        # the controlled recovery point used by streaming corporate actions.
+        self._drain_pending_data_updates()
+
         if not self._is_single_data:
             if not self._heap:
                 return None
@@ -2597,7 +2824,7 @@ cdef class BacktestDataIterator:
         self._single_data_index += 1
 
         if self._single_data_index >= self._single_data_len:
-            self._update_data(self._single_data_priority)
+            self._schedule_data_update(self._single_data_priority)
 
         return object_to_return
 
@@ -2609,7 +2836,34 @@ cdef class BacktestDataIterator:
             ts_init = self._data[data_priority][data_index].ts_init
             heapq.heappush(self._heap, (ts_init, data_priority, data_index))
         else:
-            self._update_data(data_priority)
+            self._schedule_data_update(data_priority)
+
+    cdef void _schedule_data_update(self, int data_priority):
+        """Defer a stream refill until the next iterator recovery point."""
+        cdef str data_name = self._data_name.get(data_priority)
+        if data_name is not None and data_name in self._data_update_function:
+            self._pending_data_updates.add(data_priority)
+
+    cdef bint has_data_generator(self, str data_name):
+        """Return whether an initial chunk registered a generator for deferred refills."""
+        return data_name in self._data_update_function
+
+    cdef void _drain_pending_data_updates(self):
+        """Refill exhausted streams once, before choosing the next chronological item."""
+        cdef int data_priority
+        cdef list pending
+
+        if not self._pending_data_updates:
+            return
+
+        # Sorting makes generator recovery deterministic if several streams exhausted on the
+        # same prior timestamp; actual returned-data ordering remains the heap's timestamp and
+        # stream-priority ordering.
+        pending = sorted(self._pending_data_updates)
+        self._pending_data_updates.clear()
+        for data_priority in pending:
+            if data_priority in self._data_name:
+                self._update_data(data_priority)
 
     cpdef void _update_data(self, int data_priority):
         cdef str data_name = self._data_name[data_priority]
@@ -2662,6 +2916,11 @@ cdef class BacktestDataIterator:
         """
         Return ``True`` when every stream has been fully consumed.
         """
+        # An exhausted chunk with a pending refill is not terminal. Do not drain it here:
+        # doing so would resume a streaming generator outside the controlled ``next`` recovery
+        # point, before the caller has had a chance to settle the final returned market event.
+        if self._pending_data_updates:
+            return False
         if self._is_single_data:
             return self._single_data_index >= self._single_data_len
         else:

@@ -621,6 +621,11 @@ impl Position {
     }
 
     fn apply_adjustment_state(&mut self, adjustment: PositionAdjusted, record_replay: bool) {
+        if adjustment.adjustment_type == PositionAdjustmentType::Split {
+            self.apply_forward_split_adjustment(adjustment, record_replay);
+            return;
+        }
+
         if record_replay {
             self.replay_events
                 .push(PositionReplayEvent::Adjusted(adjustment));
@@ -686,6 +691,86 @@ impl Position {
             self.peak_qty,
             self.quantity,
         );
+    }
+
+    /// Applies the versioned `stock_split:v1:<action_id>:<factor>` adjustment representation.
+    ///
+    /// This preserves fill history, commissions, cash, and realized PnL. Callers which mutate
+    /// multiple positions must prevalidate all of them before invoking this method.
+    fn apply_forward_split_adjustment(
+        &mut self,
+        adjustment: PositionAdjusted,
+        record_replay: bool,
+    ) {
+        assert!(
+            adjustment.pnl_change.is_none(),
+            "stock split cannot change realized PnL"
+        );
+        let reason = adjustment.reason.expect("stock split reason is required");
+        let parts: Vec<&str> = reason.as_str().split(':').collect();
+        assert!(
+            parts.len() == 4
+                && parts[0] == "stock_split"
+                && parts[1] == "v1"
+                && !parts[2].is_empty(),
+            "invalid stock split reason"
+        );
+        let factor: u64 = parts[3].parse().expect("invalid stock split factor");
+        assert!(factor >= 2, "stock split factor must be >= 2");
+
+        let mut expected_quantity_change = self.quantity.as_decimal() * Decimal::from(factor - 1);
+        if self.side == PositionSide::Short {
+            expected_quantity_change = -expected_quantity_change;
+        }
+        assert_eq!(
+            adjustment.quantity_change,
+            Some(expected_quantity_change),
+            "stock split quantity_change does not match current position quantity"
+        );
+
+        let split_quantity = |quantity: Quantity| {
+            let raw = quantity
+                .raw
+                .checked_mul(factor as _)
+                .expect("stock split quantity raw overflow");
+            Quantity::from_raw_checked(raw, quantity.precision)
+                .expect("stock split quantity exceeds raw quantity maximum")
+        };
+
+        assert!(
+            self.avg_px_open.is_finite() && self.avg_px_open > 0.0,
+            "stock split average open price must be finite and positive"
+        );
+        assert!(
+            self.avg_px_close
+                .is_none_or(|value| value == 0.0 || (value.is_finite() && value > 0.0)),
+            "stock split average close price must be finite and non-negative"
+        );
+
+        // Prepare every fallible quantity conversion before mutating any state.
+        let quantity = split_quantity(self.quantity);
+        let peak_qty = split_quantity(self.peak_qty);
+        let buy_qty = split_quantity(self.buy_qty);
+        let sell_qty = split_quantity(self.sell_qty);
+
+        if record_replay {
+            self.replay_events
+                .push(PositionReplayEvent::Adjusted(adjustment));
+        }
+
+        self.signed_qty *= factor as f64;
+        self.quantity = quantity;
+        self.peak_qty = peak_qty;
+        self.buy_qty = buy_qty;
+        self.sell_qty = sell_qty;
+        self.avg_px_open /= factor as f64;
+        if let Some(avg_px_close) = self.avg_px_close.as_mut() {
+            if *avg_px_close != 0.0 {
+                *avg_px_close /= factor as f64;
+            }
+        }
+        self.adjustments.push(adjustment);
+        self.ts_last = adjustment.ts_event;
     }
 
     /// Applies a cumulative fill correction allocated to this position and rebuilds derived state.

@@ -458,6 +458,62 @@ class TestBacktestDataIterator:
         assert [d.value for d in result] == [1, 2, 3, 4]
         assert [d.ts_init for d in result] == [1000, 2000, 3000, 4000]
 
+    def test_chunk_refill_occurs_on_next_recovery_point(self):
+        """The final item is yielded before its generator advances to a new chunk."""
+        iterator = BacktestDataIterator()
+        recovery_log = []
+
+        def chunked_generator():
+            yield [MyData("first", ts_init=1)]
+            recovery_log.append("resumed")
+            yield [MyData("second", ts_init=2)]
+
+        iterator.init_data("chunked_stream", chunked_generator())
+
+        assert next(iterator).value == "first"
+        assert recovery_log == []
+        assert not iterator.is_done()
+        assert next(iterator).value == "second"
+        assert recovery_log == ["resumed"]
+
+    def test_deferred_refills_preserve_multi_stream_timestamp_and_priority_order(self):
+        """Deferred generator calls do not affect global merge ordering or same-time priority."""
+        iterator = BacktestDataIterator()
+        recovery_log = []
+
+        def stream_a():
+            yield [MyData("a1", ts_init=1)]
+            recovery_log.append("a")
+            yield [MyData("a2", ts_init=3)]
+
+        def stream_b():
+            yield [MyData("b1", ts_init=1)]
+            recovery_log.append("b")
+            yield [MyData("b2", ts_init=2)]
+
+        iterator.init_data("a", stream_a())
+        iterator.init_data("b", stream_b())
+
+        assert [data.value for data in iterator] == ["a1", "b1", "b2", "a2"]
+        assert recovery_log == ["a", "b"]
+
+    def test_deferred_refill_empty_chunk_and_stream_end_remove_once(self):
+        """An empty replacement chunk still completes the stream without duplicate data."""
+        iterator = BacktestDataIterator()
+        resumes = 0
+
+        def chunked_generator():
+            nonlocal resumes
+            yield [MyData("only", ts_init=1)]
+            resumes += 1
+            yield []
+
+        iterator.init_data("empty_after_first", chunked_generator())
+
+        assert [data.value for data in iterator] == ["only"]
+        assert resumes == 1
+        assert iterator.is_done()
+
     def test_consecutive_data_addition_multiple_streams(self):
         """
         Test consecutive data addition with multiple streams providing data in chunks.

@@ -862,6 +862,7 @@ pub fn position_adjustment_type_to_capnp(
     match value {
         PositionAdjustmentType::Commission => enums_capnp::PositionAdjustmentType::Commission,
         PositionAdjustmentType::Funding => enums_capnp::PositionAdjustmentType::Funding,
+        PositionAdjustmentType::Split => enums_capnp::PositionAdjustmentType::Split,
     }
 }
 
@@ -872,6 +873,7 @@ pub fn position_adjustment_type_from_capnp(
     match value {
         enums_capnp::PositionAdjustmentType::Commission => PositionAdjustmentType::Commission,
         enums_capnp::PositionAdjustmentType::Funding => PositionAdjustmentType::Funding,
+        enums_capnp::PositionAdjustmentType::Split => PositionAdjustmentType::Split,
     }
 }
 
@@ -5557,6 +5559,16 @@ mod tests {
         );
     }
 
+    #[rstest]
+    fn position_adjusted_split_capnp_roundtrip() {
+        assert_capnp_roundtrip!(
+            sample_position_adjusted_split(),
+            position_capnp::position_adjusted::Builder,
+            position_capnp::position_adjusted::Reader,
+            PositionAdjusted
+        );
+    }
+
     fn sample_bar_specification() -> BarSpecification {
         BarSpecification::new(5, BarAggregation::Minute, PriceType::Last)
     }
@@ -5792,6 +5804,23 @@ mod tests {
             Some(dec!(-0.001)),
             Some(Money::new(-5.5, Currency::USD())),
             Some(Ustr::from("funding_2024-01-15")),
+            uuid4(),
+            UnixNanos::from(17),
+            UnixNanos::from(18),
+        )
+    }
+
+    fn sample_position_adjusted_split() -> PositionAdjusted {
+        PositionAdjusted::new(
+            trader_id(),
+            strategy_id_ema_cross(),
+            InstrumentId::from("AAPL.XNAS"),
+            PositionId::from("P-SPLIT"),
+            account_id(),
+            PositionAdjustmentType::Split,
+            Some(dec!(75)),
+            None,
+            Some(Ustr::from("stock_split:v1:aapl-2026-08-16:4")),
             uuid4(),
             UnixNanos::from(17),
             UnixNanos::from(18),

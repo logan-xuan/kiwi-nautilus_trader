@@ -178,7 +178,7 @@ mod tests {
     use super::*;
 
     #[rstest]
-    fn test_position_adjusted_round_trip() {
+    fn test_position_adjusted_funding_round_trip() {
         let event = PositionAdjusted::new(
             TraderId::from("TRADER-001"),
             StrategyId::from("EMA-CROSS"),
@@ -189,6 +189,30 @@ mod tests {
             Some(Decimal::from_str("-0.123456789123456789").unwrap()),
             Some(Money::new(-5.50, Currency::USD())),
             Some(Ustr::from("funding_2024_01_15_08:00")),
+            UUID4::default(),
+            UnixNanos::from(1_000_000_000),
+            UnixNanos::from(2_000_000_000),
+        );
+        let metadata = event.metadata();
+        let batch = PositionAdjusted::encode_batch(&metadata, &[event]).unwrap();
+        let decoded =
+            PositionAdjusted::decode_typed_batch(batch.schema().metadata(), batch).unwrap();
+
+        assert_eq!(decoded, vec![event]);
+    }
+
+    #[rstest]
+    fn test_position_adjusted_split_round_trip() {
+        let event = PositionAdjusted::new(
+            TraderId::from("TRADER-001"),
+            StrategyId::from("EMA-CROSS"),
+            InstrumentId::from("AAPL.XNAS"),
+            PositionId::from("P-002"),
+            AccountId::from("XNAS-001"),
+            PositionAdjustmentType::Split,
+            Some(Decimal::from(75)),
+            None,
+            Some(Ustr::from("stock_split:v1:aapl-2026-08-16:4")),
             UUID4::default(),
             UnixNanos::from(1_000_000_000),
             UnixNanos::from(2_000_000_000),

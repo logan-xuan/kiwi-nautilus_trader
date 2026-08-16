@@ -28,6 +28,7 @@ from nautilus_trader.model.data cimport QuoteTick
 from nautilus_trader.model.events.account cimport AccountState
 from nautilus_trader.model.events.order cimport OrderEvent
 from nautilus_trader.model.events.position cimport PositionEvent
+from nautilus_trader.model.events.position cimport PositionAdjusted
 from nautilus_trader.model.identifiers cimport AccountId
 from nautilus_trader.model.identifiers cimport InstrumentId
 from nautilus_trader.model.identifiers cimport PositionId
@@ -81,6 +82,7 @@ cdef class Portfolio(PortfolioFacade):
     cpdef void update_account(self, AccountState event)
     cpdef void update_order(self, OrderEvent event)
     cpdef void update_position(self, PositionEvent event)
+    cpdef void update_position_adjustment(self, PositionAdjusted adjustment)
     cpdef void on_order_event(self, OrderEvent event)
     cpdef void on_position_event(self, PositionEvent event)
 

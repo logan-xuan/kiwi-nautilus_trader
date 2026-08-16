@@ -17,11 +17,14 @@ from decimal import Decimal
 
 from libc.math cimport fabs
 from libc.math cimport fmin
+from libc.math cimport isfinite
+from libc.stdint cimport uint64_t
 
 from nautilus_trader.core.correctness cimport Condition
 from nautilus_trader.core.rust.model cimport InstrumentClass
 from nautilus_trader.core.rust.model cimport OrderSide
 from nautilus_trader.core.rust.model cimport PositionSide
+from nautilus_trader.core.rust.model cimport QUANTITY_RAW_MAX
 from nautilus_trader.core.uuid cimport UUID4
 from nautilus_trader.model.events.order cimport OrderFilled
 from nautilus_trader.model.events.position cimport PositionAdjusted
@@ -651,6 +654,10 @@ cdef class Position:
         """
         Condition.not_none(adjustment, "adjustment")
 
+        if adjustment.adjustment_type == PositionAdjustmentType.SPLIT:
+            self._apply_split_adjustment(adjustment)
+            return
+
         # Apply quantity change if present
         if adjustment.quantity_change is not None:
             self.signed_qty += float(adjustment.quantity_change)
@@ -685,6 +692,75 @@ cdef class Position:
                 self.entry = OrderSide.SELL
         else:
             self.side = PositionSide.FLAT
+
+        self._adjustments.append(adjustment)
+        self.ts_last = adjustment.ts_event
+
+    cdef void _apply_split_adjustment(self, PositionAdjusted adjustment):
+        """Apply a versioned forward-split adjustment outside the fill event stream."""
+        cdef list parts
+        cdef object expected_quantity_change
+        cdef object factor_obj
+        cdef uint64_t factor
+
+        if adjustment.pnl_change is not None:
+            raise ValueError("stock split adjustment cannot change realized PnL")
+        if adjustment.reason is None:
+            raise ValueError("stock split adjustment reason is required")
+
+        parts = adjustment.reason.split(":")
+        if len(parts) != 4 or parts[0] != "stock_split" or parts[1] != "v1" or not parts[2]:
+            raise ValueError("invalid stock split adjustment reason")
+
+        try:
+            factor_obj = int(parts[3])
+        except ValueError:
+            raise ValueError("invalid stock split factor")
+        if factor_obj < 2 or factor_obj > 18446744073709551615:
+            raise ValueError("stock split factor must be an integer in [2, 2^64 - 1]")
+        factor = <uint64_t>factor_obj
+
+        expected_quantity_change = self.quantity.as_decimal() * (factor_obj - 1)
+        if self.side == PositionSide.SHORT:
+            expected_quantity_change = -expected_quantity_change
+        if adjustment.quantity_change != expected_quantity_change:
+            raise ValueError("stock split quantity_change does not match current position quantity")
+
+        self.apply_forward_split_c(adjustment, factor)
+
+    cdef void validate_forward_split_c(self, uint64_t factor):
+        """Validate every mutable raw field before a forward split is committed."""
+        if factor < 2:
+            raise ValueError("stock split factor must be >= 2")
+        if self.quantity._mem.raw > QUANTITY_RAW_MAX // factor:
+            raise OverflowError("stock split quantity exceeds raw quantity maximum")
+        if self.peak_qty._mem.raw > QUANTITY_RAW_MAX // factor:
+            raise OverflowError("stock split peak quantity exceeds raw quantity maximum")
+        if self._buy_qty._mem.raw > QUANTITY_RAW_MAX // factor:
+            raise OverflowError("stock split buy quantity exceeds raw quantity maximum")
+        if self._sell_qty._mem.raw > QUANTITY_RAW_MAX // factor:
+            raise OverflowError("stock split sell quantity exceeds raw quantity maximum")
+
+        # Average costs are doubles rather than tradable tick prices. A forward split may
+        # legitimately make them sub-tick (for example 150.13 / 4), so only validate that
+        # their current values are finite and meaningful before scaling them down.
+        if not isfinite(self.avg_px_open) or self.avg_px_open <= 0.0:
+            raise ValueError("stock split average open price must be finite and positive")
+        if self.avg_px_close != 0.0 and (not isfinite(self.avg_px_close) or self.avg_px_close < 0.0):
+            raise ValueError("stock split average close price must be finite and non-negative")
+
+    cdef void apply_forward_split_c(self, PositionAdjusted adjustment, uint64_t factor):
+        """Apply a prevalidated forward split without creating a fill or changing PnL."""
+        self.validate_forward_split_c(factor)
+
+        self.signed_qty *= factor
+        self.quantity = Quantity.from_raw_c(self.quantity._mem.raw * factor, self.size_precision)
+        self.peak_qty = Quantity.from_raw_c(self.peak_qty._mem.raw * factor, self.size_precision)
+        self._buy_qty = Quantity.from_raw_c(self._buy_qty._mem.raw * factor, self.size_precision)
+        self._sell_qty = Quantity.from_raw_c(self._sell_qty._mem.raw * factor, self.size_precision)
+        self.avg_px_open /= factor
+        if self.avg_px_close != 0.0:
+            self.avg_px_close /= factor
 
         self._adjustments.append(adjustment)
         self.ts_last = adjustment.ts_event

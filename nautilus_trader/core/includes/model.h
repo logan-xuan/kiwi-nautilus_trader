@@ -784,6 +784,10 @@ typedef enum PositionAdjustmentType {
      * Funding payment affecting position realized PnL.
      */
     FUNDING = 2,
+    /**
+     * Forward stock split adjustment affecting a CASH equity position.
+     */
+    SPLIT = 3,
 } PositionAdjustmentType;
 
 /**

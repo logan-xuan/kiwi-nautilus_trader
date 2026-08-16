@@ -2732,6 +2732,187 @@ class TestPosition:
         assert reconstructed.ts_event == adjustment.ts_event
         assert reconstructed.ts_init == adjustment.ts_init
 
+    @pytest.mark.parametrize(
+        ("order_side", "quantity_change", "expected_signed_qty"),
+        [
+            (OrderSide.BUY, Decimal(75), 100.0),
+            (OrderSide.SELL, Decimal(-75), -100.0),
+        ],
+    )
+    def test_forward_split_adjustment_preserves_fill_history_and_supports_sub_tick_cost_basis(
+        self,
+        order_side: OrderSide,
+        quantity_change: Decimal,
+        expected_signed_qty: float,
+    ) -> None:
+        """A 4:1 split may produce a sub-tick average cost (150.13 / 4)."""
+        order = self.order_factory.market(AAPL_XNAS.id, order_side, Quantity.from_int(25))
+        fill = TestEventStubs.order_filled(
+            order,
+            instrument=AAPL_XNAS,
+            position_id=PositionId("P-SPLIT"),
+            strategy_id=TestIdStubs.strategy_id(),
+            last_px=Price.from_str("150.13"),
+        )
+        position = Position(instrument=AAPL_XNAS, fill=fill)
+        fill_count = position.event_count
+        commissions = position.commissions().copy()
+        realized_pnl = position.realized_pnl
+
+        adjustment = PositionAdjusted(
+            trader_id=position.trader_id,
+            strategy_id=position.strategy_id,
+            instrument_id=position.instrument_id,
+            position_id=position.id,
+            account_id=position.account_id,
+            adjustment_type=PositionAdjustmentType.SPLIT,
+            quantity_change=quantity_change,
+            pnl_change=None,
+            reason="stock_split:v1:aapl-2026-08-16:4",
+            event_id=UUID4(),
+            ts_event=1_000_000_000,
+            ts_init=1_000_000_000,
+        )
+
+        position.apply_adjustment(adjustment)
+
+        assert position.quantity == Quantity.from_int(100)
+        assert position.peak_qty == Quantity.from_int(100)
+        assert position.signed_qty == expected_signed_qty
+        assert position.avg_px_open == pytest.approx(37.5325)
+        assert position.ts_last == 1_000_000_000
+        assert position.event_count == fill_count
+        assert position.commissions() == commissions
+        assert position.realized_pnl == realized_pnl
+        assert position.adjustments[-1].adjustment_type == PositionAdjustmentType.SPLIT
+
+    def test_forward_split_adjustment_json_round_trip(self) -> None:
+        adjustment = PositionAdjusted(
+            trader_id=TestIdStubs.trader_id(),
+            strategy_id=TestIdStubs.strategy_id(),
+            instrument_id=AAPL_XNAS.id,
+            position_id=PositionId("P-SPLIT"),
+            account_id=TestIdStubs.account_id(),
+            adjustment_type=PositionAdjustmentType.SPLIT,
+            quantity_change=Decimal(75),
+            pnl_change=None,
+            reason="stock_split:v1:aapl-2026-08-16:4",
+            event_id=UUID4(),
+            ts_event=1_000_000_000,
+            ts_init=1_000_000_000,
+        )
+
+        values = PositionAdjusted.to_dict(adjustment)
+        reconstructed = PositionAdjusted.from_dict(json.loads(json.dumps(values)))
+
+        assert values["adjustment_type"] == "SPLIT"
+        assert reconstructed.adjustment_type == PositionAdjustmentType.SPLIT
+        assert reconstructed.reason == adjustment.reason
+
+    def test_forward_split_adjustment_handles_partial_close_and_consecutive_splits(self) -> None:
+        """Scaled open/close basis remains usable when a partially closed position is later closed."""
+        opening_order = self.order_factory.market(
+            AAPL_XNAS.id, OrderSide.BUY, Quantity.from_int(100)
+        )
+        opening_fill = TestEventStubs.order_filled(
+            opening_order,
+            instrument=AAPL_XNAS,
+            position_id=PositionId("P-SPLIT-PARTIAL"),
+            strategy_id=TestIdStubs.strategy_id(),
+            last_px=Price.from_str("150.13"),
+        )
+        position = Position(instrument=AAPL_XNAS, fill=opening_fill)
+
+        partial_close_order = self.order_factory.market(
+            AAPL_XNAS.id, OrderSide.SELL, Quantity.from_int(40)
+        )
+        partial_close_fill = TestEventStubs.order_filled(
+            partial_close_order,
+            instrument=AAPL_XNAS,
+            position_id=position.id,
+            strategy_id=position.strategy_id,
+            last_px=Price.from_str("200.00"),
+        )
+        position.apply(partial_close_fill)
+        assert position.quantity == Quantity.from_int(60)
+        assert position.avg_px_close == pytest.approx(200.0)
+
+        for (
+            action_id,
+            factor,
+            quantity_change,
+            expected_quantity,
+            expected_peak,
+            expected_open,
+            expected_close,
+        ) in (
+            ("aapl-2026-08-16", 2, Decimal(60), 120, 200, 75.065, 100.0),
+            ("aapl-2026-08-17", 4, Decimal(360), 480, 800, 18.76625, 25.0),
+        ):
+            position.apply_adjustment(
+                PositionAdjusted(
+                    trader_id=position.trader_id,
+                    strategy_id=position.strategy_id,
+                    instrument_id=position.instrument_id,
+                    position_id=position.id,
+                    account_id=position.account_id,
+                    adjustment_type=PositionAdjustmentType.SPLIT,
+                    quantity_change=quantity_change,
+                    pnl_change=None,
+                    reason=f"stock_split:v1:{action_id}:{factor}",
+                    event_id=UUID4(),
+                    ts_event=factor,
+                    ts_init=factor,
+                ),
+            )
+            assert position.quantity == Quantity.from_int(expected_quantity)
+            assert position.peak_qty == Quantity.from_int(expected_peak)
+            assert position.avg_px_open == pytest.approx(expected_open)
+            assert position.avg_px_close == pytest.approx(expected_close)
+
+        add_order = self.order_factory.market(
+            AAPL_XNAS.id, OrderSide.BUY, Quantity.from_int(120)
+        )
+        add_fill = TestEventStubs.order_filled(
+            add_order,
+            instrument=AAPL_XNAS,
+            position_id=position.id,
+            strategy_id=position.strategy_id,
+            last_px=Price.from_str("20.00"),
+        )
+        position.apply(add_fill)
+        assert position.quantity == Quantity.from_int(600)
+        assert position.avg_px_open == pytest.approx(19.013)
+
+        reduce_order = self.order_factory.market(
+            AAPL_XNAS.id, OrderSide.SELL, Quantity.from_int(120)
+        )
+        reduce_fill = TestEventStubs.order_filled(
+            reduce_order,
+            instrument=AAPL_XNAS,
+            position_id=position.id,
+            strategy_id=position.strategy_id,
+            last_px=Price.from_str("25.00"),
+        )
+        position.apply(reduce_fill)
+        assert position.quantity == Quantity.from_int(480)
+        assert position.realized_pnl == Money(2713.24, USD)
+
+        closing_order = self.order_factory.market(
+            AAPL_XNAS.id, OrderSide.SELL, Quantity.from_int(480)
+        )
+        closing_fill = TestEventStubs.order_filled(
+            closing_order,
+            instrument=AAPL_XNAS,
+            position_id=position.id,
+            strategy_id=position.strategy_id,
+            last_px=Price.from_str("30.00"),
+        )
+        position.apply(closing_fill)
+
+        assert position.is_closed
+        assert position.realized_pnl == Money(7987.00, USD)
+
     def test_position_with_adjustments_tracking(self) -> None:
         """
         Test that positions correctly track and store adjustment events.

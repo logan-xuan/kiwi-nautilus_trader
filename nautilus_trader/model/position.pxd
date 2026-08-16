@@ -128,6 +128,9 @@ cdef class Position:
 
     cpdef void apply(self, OrderFilled fill)
     cpdef void apply_adjustment(self, PositionAdjusted adjustment)
+    cdef void _apply_split_adjustment(self, PositionAdjusted adjustment)
+    cdef void validate_forward_split_c(self, uint64_t factor)
+    cdef void apply_forward_split_c(self, PositionAdjusted adjustment, uint64_t factor)
 
     cpdef Money notional_value(self, Price price, Currency target_currency=*, Price conversion_price=*)
     cpdef Money cross_notional_value(self, Price price, Price quote_price, Price base_price, Currency target_currency)

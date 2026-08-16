@@ -423,6 +423,8 @@ cdef extern from "../includes/model.h":
         COMMISSION # = 1,
         # Funding payment affecting position realized PnL.
         FUNDING # = 2,
+        # Forward stock split adjustment affecting a CASH equity position.
+        SPLIT # = 3,
 
     # A record flag bit field, indicating event end and data information.
     cpdef enum RecordFlag:

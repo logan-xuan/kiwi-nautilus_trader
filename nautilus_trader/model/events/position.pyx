@@ -1045,7 +1045,7 @@ cdef class PositionAdjusted(Event):
     Represents an adjustment to a position's quantity or realized PnL.
 
     This event is used to track changes to positions that occur outside of normal
-    order fills, such as commission adjustments or funding payments.
+    order fills, such as commission adjustments, funding payments, or forward stock splits.
 
     Parameters
     ----------
@@ -1216,6 +1216,8 @@ cdef class PositionAdjusted(Event):
             adjustment_type_str = "COMMISSION"
         elif obj.adjustment_type == PositionAdjustmentType.FUNDING:
             adjustment_type_str = "FUNDING"
+        elif obj.adjustment_type == PositionAdjustmentType.SPLIT:
+            adjustment_type_str = "SPLIT"
         else:
             adjustment_type_str = "UNKNOWN"
 

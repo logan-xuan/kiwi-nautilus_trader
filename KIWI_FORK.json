@@ -1,7 +1,7 @@
 {
   "schemaVersion": "kiwi-nautilus-fork-v1",
   "distribution": "nautilus_trader",
-  "version": "1.231.0+kiwi.3",
+  "version": "1.231.0+kiwi.4",
   "upstreamRepository": "https://github.com/nautechsystems/nautilus_trader.git",
   "upstreamVersion": "1.231.0",
   "upstreamCommit": "160f76a8d0d1067bee16ea171dcbd7e3e18b414f",
@@ -45,6 +45,21 @@
       "tests": [
         "tests/unit_tests/backtest/test_exchange_margin.py::TestSimulatedExchangeMarginAccount::test_submit_market_on_open_order_fills_at_next_bar_open",
         "Kiwi adapter BAR_NEXT_OPEN golden test"
+      ]
+    },
+    {
+      "id": "KIWI-CORPORATE-ACTION-SPLIT-001",
+      "issue": "https://github.com/logan-xuan/kiwi-trade-node/issues/3",
+      "purpose": "Atomic, idempotent forward stock-split adjustment at the controlled streaming backtest settlement boundary",
+      "adapterLimitation": "The Trade Node cannot safely synthesize split fills or mutate Nautilus positions outside the engine's cache, order-state, and portfolio consistency checks",
+      "upstreamStatus": "PENDING_PROVEN_PATCH",
+      "tests": [
+        "tests/unit_tests/model/test_position.py",
+        "tests/unit_tests/model/test_position_pyo3.py",
+        "tests/unit_tests/backtest/test_engine.py::TestBacktestEngineForwardSplit",
+        "tests/unit_tests/backtest/test_data_iterator.py",
+        "scripts/kiwi/wheel_forward_split_smoke.py",
+        "Kiwi wheel CI installed forward-split smoke"
       ]
     }
   ]
