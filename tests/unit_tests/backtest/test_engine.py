@@ -38,6 +38,7 @@ from nautilus_trader.examples.strategies.signal_strategy import SignalStrategyCo
 from nautilus_trader.execution.algorithm import ExecAlgorithm
 from nautilus_trader.model.currencies import USD
 from nautilus_trader.model.currencies import USDT
+from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarSpecification
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import BookOrder
@@ -56,7 +57,9 @@ from nautilus_trader.model.enums import MarketStatusAction
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import PriceType
+from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.identifiers import ClientId
+from nautilus_trader.model.identifiers import PositionId
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.objects import Money
@@ -1064,6 +1067,108 @@ def _cash_equity_engine_with_position(position_id: str):
 
 
 class TestBacktestEngineForwardSplit:
+    def test_forward_split_precedes_same_timestamp_target_moo(self):
+        """The effective-at target sees split position/NAV before its next-open order exists."""
+        from nautilus_trader.common.component import TestClock
+        from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.model.events.order import OrderFilled
+        from nautilus_trader.model.position import Position
+        from nautilus_trader.test_kit.stubs.events import TestEventStubs
+        from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+        engine = BacktestEngine(BacktestEngineConfig(logging=LoggingConfig(bypass_logging=True)))
+        instrument = TestInstrumentProvider.equity("AAPL", "XNAS")
+        engine.add_venue(
+            venue=instrument.id.venue,
+            oms_type=OmsType.HEDGING,
+            account_type=AccountType.CASH,
+            base_currency=USD,
+            starting_balances=[Money(1_000_000, USD)],
+            fill_model=FillModel(),
+        )
+        engine.add_instrument(instrument)
+        order = OrderFactory(
+            trader_id=TestIdStubs.trader_id(),
+            strategy_id=TestIdStubs.strategy_id(),
+            clock=TestClock(),
+        ).market(instrument.id, OrderSide.BUY, Quantity.from_int(25))
+        fill = TestEventStubs.order_filled(
+            order,
+            instrument=instrument,
+            position_id=PositionId("P-SPLIT-SAME-TIMESTAMP"),
+            last_px=Price.from_str("150.13"),
+        )
+        position = Position(instrument=instrument, fill=fill)
+        engine.kernel.cache.add_position(position, OmsType.HEDGING)
+        timer_state = []
+
+        class SameTimestampTargetStrategy(Strategy):
+            def on_start(self):
+                self.clock.set_time_alert_ns(
+                    name="post-split-target",
+                    alert_time_ns=2,
+                    callback=self._submit_target_at_next_open,
+                )
+
+            def _submit_target_at_next_open(self, _event):
+                # This records the exact portfolio state from which a WEIGHT target would be
+                # materialized. It must be the post-split position before creating its MOO.
+                timer_state.append((
+                    position.quantity,
+                    engine.portfolio.net_position(instrument.id),
+                    engine.portfolio.net_exposure(instrument.id, Price.from_str("75.065")),
+                ))
+                target = self.order_factory.market(
+                    instrument.id,
+                    OrderSide.BUY,
+                    Quantity.from_int(10),
+                    time_in_force=TimeInForce.AT_THE_OPEN,
+                )
+                self.submit_order(target)
+
+        strategy = SameTimestampTargetStrategy()
+        engine.add_strategy(strategy)
+        adjustments = []
+        bar_type = BarType(
+            instrument_id=instrument.id,
+            bar_spec=BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST),
+            aggregation_source=AggregationSource.EXTERNAL,
+        )
+
+        def native_batches():
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=1)]
+            adjustments.extend(engine.apply_forward_split(
+                instrument.id, 2, "aapl-same-timestamp", 2,
+            ))
+            assert engine.apply_forward_split(
+                instrument.id, 2, "aapl-same-timestamp", 2,
+            ) == ()
+            yield [Bar(
+                bar_type=bar_type,
+                open=Price.from_str("75.00"), high=Price.from_str("75.10"),
+                low=Price.from_str("74.90"), close=Price.from_str("75.05"),
+                volume=Quantity.from_int(1_000), ts_event=3, ts_init=3,
+            )]
+
+        try:
+            engine.add_data_iterator("same-timestamp-target", native_batches())
+            engine.run()
+
+            assert len(adjustments) == 1
+            # 25 @ 150.13 and 50 @ 75.065 have the same 3,753.25 USD
+            # exposure. The callback therefore has both split-adjusted quantity
+            # and a portfolio/NAV projection consistent with that quantity.
+            assert timer_state == [(Quantity.from_int(50), Decimal(50), Money(3753.25, USD))]
+            assert position.quantity == Quantity.from_int(60)
+            assert position.avg_px_open == pytest.approx(75.05416666666667)
+            assert engine.portfolio.net_position(instrument.id) == Decimal(60)
+            fills = [event for event in strategy.store if isinstance(event, OrderFilled)]
+            assert len(fills) == 1
+            assert fills[0].last_px == Price.from_str("75.00")
+            assert fills[0].ts_event == 3
+        finally:
+            engine.dispose()
+
     def test_flat_split_registration_makes_later_duplicate_a_noop(self):
         """A flat action is registered, so replay cannot adjust a subsequently opened position."""
         from nautilus_trader.common.component import TestClock

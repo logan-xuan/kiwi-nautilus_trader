@@ -529,6 +529,7 @@ cdef class BacktestEngine:
             list result = []
             tuple action_key
             CVec raw_handlers
+            bint advanced_to_action = False
 
         Condition.not_none(instrument_id, "instrument_id")
         Condition.not_none(action_id, "action_id")
@@ -559,23 +560,19 @@ cdef class BacktestEngine:
             raise ValueError("conflicting duplicate stock split action")
 
         # A corporate action may be effective between the settled prior data event and the
-        # next event returned by a streaming iterator. Advance all clocks and settle timers
-        # before the action, but never expose this API while timer/strategy callbacks run.
+        # next event returned by a streaming iterator. Advance and settle only timers that
+        # are strictly before the action. Timers at the effective timestamp must observe the
+        # already-adjusted position/NAV and may only submit post-split orders afterwards.
         if ts_event_ns < self._kernel.clock.timestamp_ns():
             raise ValueError("stock split timestamp cannot precede the current backtest clock")
         if ts_event_ns > self._kernel.clock.timestamp_ns():
             self._corporate_action_boundary_active = False
             try:
                 raw_handlers = self._advance_time(ts_event_ns)
-                try:
-                    self._process_raw_time_event_handlers(raw_handlers, ts_event_ns, only_now=True)
-                finally:
-                    if raw_handlers.ptr != NULL:
-                        vec_time_event_handlers_drop(raw_handlers)
-                self._process_and_settle_venues(ts_event_ns)
             finally:
                 self._corporate_action_boundary_active = True
             self._last_ns = ts_event_ns
+            advanced_to_action = True
 
         cache = <Cache>self._kernel.cache
         msgbus = <MessageBus>self._kernel.msgbus
@@ -657,6 +654,19 @@ cdef class BacktestEngine:
                 topic=f"events.position_adjusted.{adjustment.strategy_id}",
                 msg=adjustment,
             )
+
+        # Only after the action is fully committed and the portfolio projection has been
+        # refreshed may effective-at timers run. This preserves fail-closed behavior for a
+        # pre-existing order: on any split validation failure this block is never reached.
+        if advanced_to_action:
+            self._corporate_action_boundary_active = False
+            try:
+                self._process_raw_time_event_handlers(raw_handlers, ts_event_ns, only_now=True)
+            finally:
+                if raw_handlers.ptr != NULL:
+                    vec_time_event_handlers_drop(raw_handlers)
+                self._corporate_action_boundary_active = True
+            self._process_and_settle_venues(ts_event_ns)
 
         return tuple(result)
 

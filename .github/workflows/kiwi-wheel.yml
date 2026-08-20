@@ -73,7 +73,8 @@ jobs:
             tests/unit_tests/backtest/test_engine_timers.py \
             tests/unit_tests/backtest/test_fill_models.py \
             tests/unit_tests/backtest/test_matching_engine.py \
-            tests/unit_tests/backtest/test_exchange_margin.py::TestSimulatedExchangeMarginAccount::test_submit_market_on_open_order_fills_at_next_bar_open
+            tests/unit_tests/backtest/test_exchange_margin.py::TestSimulatedExchangeMarginAccount::test_submit_market_on_open_order_fills_at_next_bar_open \
+            tests/unit_tests/backtest/test_engine.py::TestBacktestEngineForwardSplit
 
       - name: Generate release metadata
         run: python3 scripts/kiwi/release_metadata.py --wheel "$(find dist -maxdepth 1 -name 'nautilus_trader-*.whl' -print -quit)" --output "dist/kiwi-metadata-macos-arm64"
