@@ -1169,6 +1169,57 @@ class TestBacktestEngineForwardSplit:
         finally:
             engine.dispose()
 
+    def test_forward_split_validation_failure_does_not_run_same_timestamp_timer(self):
+        """A rejected split cannot release its effective-at target before atomicity is known."""
+        from nautilus_trader.common.component import TestClock
+        from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
+
+        engine, instrument, position = _cash_equity_engine_with_position("P-SPLIT-FAILED-SAME-TIMESTAMP")
+        timer_fired_at = []
+
+        class SameTimestampSentinelStrategy(Strategy):
+            def on_start(self):
+                self.clock.set_time_alert_ns(
+                    name="must-not-run-during-rejected-split",
+                    alert_time_ns=2,
+                    callback=self._record_timer,
+                )
+
+            def _record_timer(self, _event):
+                timer_fired_at.append(engine.kernel.clock.timestamp_ns())
+
+        strategy = SameTimestampSentinelStrategy()
+        engine.add_strategy(strategy)
+        open_order = OrderFactory(
+            trader_id=TestIdStubs.trader_id(),
+            strategy_id=TestIdStubs.strategy_id(),
+            clock=TestClock(),
+        ).market(instrument.id, OrderSide.BUY, Quantity.from_int(1))
+        engine.kernel.cache.add_order(open_order, position_id=position.id)
+
+        def native_batches():
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=1)]
+            with pytest.raises(RuntimeError, match="non-closed order"):
+                engine.apply_forward_split(instrument.id, 2, "aapl-failed-same-timestamp", 2)
+            # apply_forward_split advanced to the effective time, so this assertion
+            # specifically proves its failure path did not release the timer.
+            assert engine.kernel.clock.timestamp_ns() == 2
+            assert timer_fired_at == []
+            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=3)]
+
+        try:
+            engine.add_data_iterator("failed-same-timestamp-target", native_batches())
+            engine.run()
+
+            # The regular t=3 advance may later deliver the still-pending t=2
+            # timer, but it was never run by the failed atomic split attempt.
+            assert timer_fired_at == [2]
+            assert position.quantity == Quantity.from_int(25)
+            assert position.adjustments == []
+        finally:
+            engine.dispose()
+
     def test_flat_split_registration_makes_later_duplicate_a_noop(self):
         """A flat action is registered, so replay cannot adjust a subsequently opened position."""
         from nautilus_trader.common.component import TestClock
