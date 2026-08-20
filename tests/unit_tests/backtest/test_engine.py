@@ -1166,9 +1166,16 @@ class TestBacktestEngineForwardSplit:
             # exposure. The callback therefore has both split-adjusted quantity
             # and a portfolio/NAV projection consistent with that quantity.
             assert timer_state == [(Quantity.from_int(50), Decimal(50), Money(3753.25, USD))]
-            assert position.quantity == Quantity.from_int(60)
-            assert position.avg_px_open == pytest.approx(75.05416666666667)
+            # The seeded and callback strategy IDs are distinct. With HEDGING OMS,
+            # the post-split MOO opens a second position rather than mutating the
+            # seeded split position.
+            assert position.quantity == Quantity.from_int(50)
+            assert position.avg_px_open == pytest.approx(75.065)
             assert engine.portfolio.net_position(instrument.id) == Decimal(60)
+            assert sorted(
+                open_position.quantity.as_decimal()
+                for open_position in engine.kernel.cache.positions_open(None, instrument.id)
+            ) == [Decimal(10), Decimal(50)]
             fills = [event for event in strategy.store if isinstance(event, OrderFilled)]
             assert len(fills) == 1
             assert fills[0].last_px == Price.from_str("75.00")
