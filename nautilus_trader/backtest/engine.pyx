@@ -550,6 +550,10 @@ cdef class BacktestEngine:
         if factor_py < 2 or factor_py > 18446744073709551615:
             raise ValueError("stock split factor must be an integer in [2, 2^64 - 1]")
 
+        raw_handlers.ptr = NULL
+        raw_handlers.len = 0
+        raw_handlers.cap = 0
+
         # The idempotency check must precede timestamp advancement. A replay can re-submit an
         # already-applied action after the engine clock has moved on, and must still be a no-op.
         action_key = (instrument_id, action_id)
@@ -574,101 +578,106 @@ cdef class BacktestEngine:
             self._last_ns = ts_event_ns
             advanced_to_action = True
 
-        cache = <Cache>self._kernel.cache
-        msgbus = <MessageBus>self._kernel.msgbus
-        if cache.has_backing:
-            raise RuntimeError("stock split is unsupported when the cache has a backing database")
-        instrument = cache.instrument(instrument_id)
-        if instrument is None:
-            raise ValueError(f"no instrument registered for stock split: {instrument_id}")
-        if not isinstance(instrument, Equity):
-            raise ValueError("stock split is only supported for Equity instruments")
+        # Every post-advance exit owns `raw_handlers`. Validation failures must
+        # release it without executing effective-at callbacks; a successful
+        # commit releases it only after those callbacks have run post-split.
+        try:
+            cache = <Cache>self._kernel.cache
+            msgbus = <MessageBus>self._kernel.msgbus
+            if cache.has_backing:
+                raise RuntimeError("stock split is unsupported when the cache has a backing database")
+            instrument = cache.instrument(instrument_id)
+            if instrument is None:
+                raise ValueError(f"no instrument registered for stock split: {instrument_id}")
+            if not isinstance(instrument, Equity):
+                raise ValueError("stock split is only supported for Equity instruments")
 
-        exchange = self._venues.get(instrument_id.venue)
-        if exchange is None:
-            raise ValueError(f"no simulated exchange registered for stock split venue: {instrument_id.venue}")
-        if exchange.account_type != AccountType.CASH:
-            raise ValueError("stock split is only supported for CASH accounts")
+            exchange = self._venues.get(instrument_id.venue)
+            if exchange is None:
+                raise ValueError(f"no simulated exchange registered for stock split venue: {instrument_id.venue}")
+            if exchange.account_type != AccountType.CASH:
+                raise ValueError("stock split is only supported for CASH accounts")
 
-        # Any non-terminal order, including emulated, local, inflight, or pending commands,
-        # makes an in-place position adjustment unsafe.
-        for order in cache.orders(None, instrument_id):
-            if not order.is_closed_c():
-                raise RuntimeError("stock split rejected while a non-closed order exists")
-        for command in exchange._message_queue:
-            if command.instrument_id == instrument_id:
-                raise RuntimeError("stock split rejected while a local command is pending")
-        for queued in exchange._inflight_queue:
-            command = queued[1]
-            if command.instrument_id == instrument_id:
-                raise RuntimeError("stock split rejected while an inflight command exists")
+            # Any non-terminal order, including emulated, local, inflight, or pending commands,
+            # makes an in-place position adjustment unsafe.
+            for order in cache.orders(None, instrument_id):
+                if not order.is_closed_c():
+                    raise RuntimeError("stock split rejected while a non-closed order exists")
+            for command in exchange._message_queue:
+                if command.instrument_id == instrument_id:
+                    raise RuntimeError("stock split rejected while a local command is pending")
+            for queued in exchange._inflight_queue:
+                command = queued[1]
+                if command.instrument_id == instrument_id:
+                    raise RuntimeError("stock split rejected while an inflight command exists")
 
-        matching_engine = exchange._matching_engines.get(instrument_id)
-        if matching_engine is not None:
-            if (
-                matching_engine._market_on_open_orders
-                or matching_engine._queue_ahead
-                or matching_engine._queue_excess
-                or matching_engine._queue_pending
-                or matching_engine._cached_filled_qty
-            ):
-                raise RuntimeError("stock split rejected while matching-engine queue or MOO state exists")
+            matching_engine = exchange._matching_engines.get(instrument_id)
+            if matching_engine is not None:
+                if (
+                    matching_engine._market_on_open_orders
+                    or matching_engine._queue_ahead
+                    or matching_engine._queue_excess
+                    or matching_engine._queue_pending
+                    or matching_engine._cached_filled_qty
+                ):
+                    raise RuntimeError("stock split rejected while matching-engine queue or MOO state exists")
 
-        positions = cache.positions_open(None, instrument_id)
-        for position in positions:
-            position.validate_forward_split_c(<uint64_t>factor_py)
-            quantity_change = position.quantity.as_decimal() * (factor_py - 1)
-            if position.side == PositionSide.SHORT:
-                quantity_change = -quantity_change
-            adjustment = PositionAdjusted(
-                trader_id=position.trader_id,
-                strategy_id=position.strategy_id,
-                instrument_id=instrument_id,
-                position_id=position.id,
-                account_id=position.account_id,
-                adjustment_type=PositionAdjustmentType.SPLIT,
-                quantity_change=quantity_change,
-                pnl_change=None,
-                reason=f"stock_split:v1:{action_id}:{factor_py}",
-                event_id=UUID4(),
-                ts_event=ts_event_ns,
-                ts_init=self._kernel.clock.timestamp_ns(),
-            )
-            prepared.append((position, adjustment))
+            positions = cache.positions_open(None, instrument_id)
+            for position in positions:
+                position.validate_forward_split_c(<uint64_t>factor_py)
+                quantity_change = position.quantity.as_decimal() * (factor_py - 1)
+                if position.side == PositionSide.SHORT:
+                    quantity_change = -quantity_change
+                adjustment = PositionAdjusted(
+                    trader_id=position.trader_id,
+                    strategy_id=position.strategy_id,
+                    instrument_id=instrument_id,
+                    position_id=position.id,
+                    account_id=position.account_id,
+                    adjustment_type=PositionAdjustmentType.SPLIT,
+                    quantity_change=quantity_change,
+                    pnl_change=None,
+                    reason=f"stock_split:v1:{action_id}:{factor_py}",
+                    event_id=UUID4(),
+                    ts_event=ts_event_ns,
+                    ts_init=self._kernel.clock.timestamp_ns(),
+                )
+                prepared.append((position, adjustment))
 
-        # All validations and event construction complete: commit every position, then refresh
-        # cache and portfolio-derived state. No fill, order, account, or fee event is generated.
-        for position, adjustment in prepared:
-            position.apply_forward_split_c(adjustment, <uint64_t>factor_py)
-            cache.update_position(position)
-            result.append(adjustment)
+            # All validations and event construction complete: commit every position, then refresh
+            # cache and portfolio-derived state. No fill, order, account, or fee event is generated.
+            for position, adjustment in prepared:
+                position.apply_forward_split_c(adjustment, <uint64_t>factor_py)
+                cache.update_position(position)
+                result.append(adjustment)
 
-        self._forward_split_actions[action_key] = (factor_py, ts_event_ns)
-        self._corporate_action_boundary_applied = True
-        for adjustment in result:
-            msgbus.send(
-                endpoint="Portfolio.update_position_adjustment",
-                msg=adjustment,
-            )
-            msgbus.publish_c(
-                topic=f"events.position_adjusted.{adjustment.strategy_id}",
-                msg=adjustment,
-            )
+            self._forward_split_actions[action_key] = (factor_py, ts_event_ns)
+            self._corporate_action_boundary_applied = True
+            for adjustment in result:
+                msgbus.send(
+                    endpoint="Portfolio.update_position_adjustment",
+                    msg=adjustment,
+                )
+                msgbus.publish_c(
+                    topic=f"events.position_adjusted.{adjustment.strategy_id}",
+                    msg=adjustment,
+                )
 
-        # Only after the action is fully committed and the portfolio projection has been
-        # refreshed may effective-at timers run. This preserves fail-closed behavior for a
-        # pre-existing order: on any split validation failure this block is never reached.
-        if advanced_to_action:
-            self._corporate_action_boundary_active = False
-            try:
-                self._process_raw_time_event_handlers(raw_handlers, ts_event_ns, only_now=True)
-            finally:
-                if raw_handlers.ptr != NULL:
-                    vec_time_event_handlers_drop(raw_handlers)
-                self._corporate_action_boundary_active = True
-            self._process_and_settle_venues(ts_event_ns)
+            # Only after the action is fully committed and the portfolio projection has been
+            # refreshed may effective-at timers run. This preserves fail-closed behavior for a
+            # pre-existing order: on any split validation failure this block is never reached.
+            if advanced_to_action:
+                self._corporate_action_boundary_active = False
+                try:
+                    self._process_raw_time_event_handlers(raw_handlers, ts_event_ns, only_now=True)
+                finally:
+                    self._corporate_action_boundary_active = True
+                self._process_and_settle_venues(ts_event_ns)
 
-        return tuple(result)
+            return tuple(result)
+        finally:
+            if raw_handlers.ptr != NULL:
+                vec_time_event_handlers_drop(raw_handlers)
 
     def list_venues(self) -> list[Venue]:
         """
