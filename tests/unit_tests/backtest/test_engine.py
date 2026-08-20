@@ -1101,6 +1101,7 @@ class TestBacktestEngineForwardSplit:
         position = Position(instrument=instrument, fill=fill)
         engine.kernel.cache.add_position(position, OmsType.HEDGING)
         timer_state = []
+        fill_events = []
 
         class SameTimestampTargetStrategy(Strategy):
             def on_start(self):
@@ -1125,6 +1126,9 @@ class TestBacktestEngineForwardSplit:
                     time_in_force=TimeInForce.AT_THE_OPEN,
                 )
                 self.submit_order(target)
+
+            def on_order_filled(self, event):
+                fill_events.append(event)
 
         strategy = SameTimestampTargetStrategy()
         engine.add_strategy(strategy)
@@ -1176,10 +1180,10 @@ class TestBacktestEngineForwardSplit:
                 open_position.quantity.as_decimal()
                 for open_position in engine.kernel.cache.positions_open(None, instrument.id)
             ) == [Decimal(10), Decimal(50)]
-            fills = [event for event in strategy.store if isinstance(event, OrderFilled)]
-            assert len(fills) == 1
-            assert fills[0].last_px == Price.from_str("75.00")
-            assert fills[0].ts_event == 3
+            assert len(fill_events) == 1
+            assert isinstance(fill_events[0], OrderFilled)
+            assert fill_events[0].last_px == Price.from_str("75.00")
+            assert fill_events[0].ts_event == 3
         finally:
             engine.dispose()
 
