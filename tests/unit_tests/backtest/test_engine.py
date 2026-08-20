@@ -1136,7 +1136,14 @@ class TestBacktestEngineForwardSplit:
         )
 
         def native_batches():
-            yield [TestDataStubs.quote_tick(instrument, 150.00, 150.01, ts_init=1)]
+            # Establish bar execution before the effective-at timer submits its
+            # market-on-open order. Tick execution rightly rejects AT_THE_OPEN.
+            yield [Bar(
+                bar_type=bar_type,
+                open=Price.from_str("150.00"), high=Price.from_str("150.10"),
+                low=Price.from_str("149.90"), close=Price.from_str("150.05"),
+                volume=Quantity.from_int(1_000), ts_event=1, ts_init=1,
+            )]
             adjustments.extend(engine.apply_forward_split(
                 instrument.id, 2, "aapl-same-timestamp", 2,
             ))
@@ -1173,6 +1180,7 @@ class TestBacktestEngineForwardSplit:
         """A rejected split cannot release its effective-at target before atomicity is known."""
         from nautilus_trader.common.component import TestClock
         from nautilus_trader.common.factories import OrderFactory
+        from nautilus_trader.model.identifiers import ClientOrderId
         from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
 
         engine, instrument, position = _cash_equity_engine_with_position("P-SPLIT-FAILED-SAME-TIMESTAMP")
@@ -1195,7 +1203,12 @@ class TestBacktestEngineForwardSplit:
             trader_id=TestIdStubs.trader_id(),
             strategy_id=TestIdStubs.strategy_id(),
             clock=TestClock(),
-        ).market(instrument.id, OrderSide.BUY, Quantity.from_int(1))
+        ).market(
+            instrument.id,
+            OrderSide.BUY,
+            Quantity.from_int(1),
+            client_order_id=ClientOrderId("O-SPLIT-FAILED-SAME-TIMESTAMP"),
+        )
         engine.kernel.cache.add_order(open_order, position_id=position.id)
 
         def native_batches():
